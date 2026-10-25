@@ -3,3 +3,10 @@ __pycache__/
 *.egg-info/
 build/
 result*
+.DS_Store
+._*
+
+.env
+.env.*
+!.env.example
+!.env.sample

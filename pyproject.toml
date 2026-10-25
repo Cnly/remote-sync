@@ -7,7 +7,13 @@ name = "remote-sync"
 version = "0.1.0"
 description = "DiffSync reconciliation for remote resources"
 requires-python = ">=3.11"
-dependencies = ["diffsync>=2,<3", "requests>=2,<3", "structlog"]
+dependencies = [
+    "certifi>=2026.10.19",
+    "diffsync>=2,<3",
+    "requests>=2,<3",
+    "structlog",
+    "urllib3>=2.8,<3",
+]
 
 [project.scripts]
 remote-sync = "remote_sync.cli:main"
