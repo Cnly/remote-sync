@@ -1,6 +1,6 @@
 """Manages Tailscale Services and approves devices to host them."""
 
-from functools import cached_property
+from functools import cache, cached_property
 import time
 from urllib.parse import quote
 
@@ -102,11 +102,15 @@ class Tailscale(Provider):
         progress("  Fetching devices to resolve service hosts...", detail=True)
         return self.api.request("GET", "/tailnet/-/devices")["devices"]
 
+    @cache
     def device_id(self, selector):
         matches = [device for device in self.devices if selector in {
             device["nodeId"], device["id"], device["hostname"], device["name"], device["name"].split(".", 1)[0],
         }]
-        assert matches, f"Tailscale device {selector!r} was not found."
+        if not matches:
+            progress(f"Warning: Tailscale device {selector!r} was not found; "
+                     "deferring service approvals. Run sync again after it joins the tailnet.")
+            return None
         assert len(matches) == 1, f"Multiple devices match {selector!r}; use a stable node ID."
         return matches[0]["nodeId"]
 
@@ -116,7 +120,8 @@ class Tailscale(Provider):
             "displayName": declaration.get("displayName", ""),
             "ports": sorted(set(declaration["ports"])),
             "tags": sorted(set(declaration.get("tags", []))),
-            "devices": {device: True for device in declaration.get("devices", [])},
+            "devices": {device: True for device in declaration.get("devices", [])
+                        if self.device_id(device) is not None},
         }
 
     def resolve_identity(self, key, declaration, service, inventory):
@@ -128,7 +133,7 @@ class Tailscale(Provider):
 
         for selector in dict.fromkeys(declaration.get("devices", [])):
             device_id = self.device_id(selector)
-            if service is not None:
+            if service is not None and device_id is not None:
                 progress(f"  Reading approval for {selector} on {service.name}...", detail=True)
                 approval = self.api.request("GET", self.approval_path(service.name, device_id))
                 service.approvals[selector] = approval["approved"] or approval.get("autoApproved", False)

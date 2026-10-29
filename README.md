@@ -167,9 +167,11 @@ Healthchecks sync never deletes checks.
 
 `name` defaults to `svc:<key>`; `displayName` defaults to an empty string.
 Updates preserve comments and assigned IP addresses. `devices` selects hosts by
-hostname, short or full MagicDNS name, device ID, or node ID. Missing or ambiguous
-devices abort discovery. Pending approvals appear as updates; apply approves
-them. Removing a device from the list does not revoke its approval.
+hostname, short or full MagicDNS name, device ID, or node ID. Missing devices are
+skipped with a warning, so services can be created before hosts join the
+tailnet. Run sync again after they join to approve them. Ambiguous device matches
+still abort discovery. Pending approvals appear as updates; apply approves them.
+Removing a device from the list does not revoke its approval.
 
 Host collection requires both Tailscale and Serve enabled:
 

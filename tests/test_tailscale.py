@@ -255,13 +255,49 @@ def test_device_selectors_resolve_to_stable_node_ids(selector):
     assert sum(path == "/tailnet/-/devices" for _, path, _ in api.calls) == 1
 
 
-@pytest.mark.parametrize("devices, message", [
-    ([], "not found"),
-    ([device(), device("nOtherCNTRL", id="456")], "Multiple devices"),
-])
-def test_missing_or_ambiguous_device_names_abort_before_writes(devices, message):
-    api = TailscaleAPI(service(), devices=devices)
-    with pytest.raises(AssertionError, match=message):
+def test_services_can_be_created_before_hosts_join_then_approved_on_next_sync(capsys):
+    api = TailscaleAPI(devices=[])
+    remote, desired, diff = sync_plan(api)
+    assert remote.desired["svc:app"]["devices"] == {}
+    assert diff.summary()["create"] == 1
+    assert not api.writes
+    assert "deferring service approvals" in capsys.readouterr().err
+    apply(remote, desired, diff)
+    original = deepcopy(api.services["svc:app"])
+    assert original["comment"] == MARKER
+    assert [method for method, _, _ in api.writes] == ["PUT"]
+    assert not any("/approved" in path for _, path, _ in api.calls)
+    assert not sync_plan(api)[2].has_diffs()
+
+    api.devices.append(device())
+    api.calls.clear()
+    remote, desired, diff = sync_plan(api)
+    assert diff.summary()["update"] == 1
+    apply(remote, desired, diff)
+    assert api.writes == [
+        ("POST", "/tailnet/-/services/svc%3Aapp/device/nHostCNTRL/approved", {"json": {"approved": True}}),
+    ]
+    assert api.services["svc:app"] == original
+    assert not sync_plan(api)[2].has_diffs()
+
+
+def test_missing_host_warns_once_and_does_not_block_other_hosts_or_service_updates(capsys):
+    api = TailscaleAPI(service(displayName="Old label"), service("svc:second"))
+    declaration = DECLARATION | {"devices": ["seattle", "kawai"]}
+    declarations = {"app": declaration, "second": declaration | {"name": "svc:second"}}
+    remote, desired, diff = sync_plan(api, declarations)
+    assert capsys.readouterr().err.count("Tailscale device 'kawai' was not found") == 1
+    assert all(settings["devices"] == {"seattle": True} for settings in remote.desired.values())
+    apply(remote, desired, diff)
+    assert api.services["svc:app"]["displayName"] == ""
+    assert [method for method, _, _ in api.writes] == ["PUT", "POST", "POST"]
+    assert all(api.approvals[name, "nHostCNTRL"]["approved"] for name in api.services)
+    assert not sync_plan(api, declarations)[2].has_diffs()
+
+
+def test_ambiguous_device_names_abort_before_writes():
+    api = TailscaleAPI(service(), devices=[device(), device("nOtherCNTRL", id="456")])
+    with pytest.raises(AssertionError, match="Multiple devices"):
         sync_plan(api)
     assert not api.writes
 

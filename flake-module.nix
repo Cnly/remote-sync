@@ -32,7 +32,7 @@
       devices = mkOption {
         type = listOf str;
         default = [];
-        description = "Devices to approve as hosts for this service, selected by hostname, MagicDNS name, device ID, or stable node ID. Other approvals are preserved.";
+        description = "Devices to approve as hosts for this service, selected by hostname, MagicDNS name, device ID, or stable node ID. Missing devices are skipped with a warning; run sync again after they join the tailnet. Other approvals are preserved.";
       };
     };
   };
