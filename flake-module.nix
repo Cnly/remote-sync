@@ -128,6 +128,29 @@
     };
   };
 
+  inhibitionRuleModule = {
+    options = (lib.genAttrs [ "source_matchers" "target_matchers" ] (field: mkOption {
+      description = "${field} for the InhibitionRule; matchers within each list are ANDed.";
+      type = listOf (submodule {
+        options = {
+          label = mkOption { type = str; description = "Alert label to match."; };
+          type = mkOption {
+            type = lib.types.enum [ "=" "!=" "=~" "!~" ];
+            default = "=";
+            description = "Matcher operator; regular expressions use RE2 syntax.";
+          };
+          value = mkOption { type = str; description = "Label value or regular expression."; };
+        };
+      });
+    })) // {
+      equal = mkOption {
+        type = listOf str;
+        default = [];
+        description = "Labels that must match between source and target alerts. Missing and empty values are equivalent; an empty list applies across all label values.";
+      };
+    };
+  };
+
   serviceModule = { name, ... }: {
     options = {
       name = mkOption {
@@ -299,7 +322,7 @@ in {
   options = {
     grafana = mkOption {
       default = null;
-      description = "Grafana alert-folder reconciliation; configure this to expose the grafana app.";
+      description = "Grafana alert-folder and notification-inhibition reconciliation; configure this to expose the grafana app.";
       type = nullOr (submodule ({ config, ... }: {
         options = {
           owner = mkOption {
@@ -328,6 +351,16 @@ in {
             type = deferredModule;
             default = {};
             description = "Module applied to every folder; use mkDefault for overridable defaults.";
+          };
+          inhibitionRules = mkOption {
+            type = attrsOf (submodule [ inhibitionRuleModule config.inhibitionRuleDefaults ]);
+            default = {};
+            description = "Notification inhibition rules managed alongside alert folders by the grafana app. Keys determine immutable names nix-sync-<owner>--<key>, which must be lowercase DNS names of at most 40 characters. Removing a declaration deletes its owned rule; unowned and externally provisioned rules are preserved.";
+          };
+          inhibitionRuleDefaults = mkOption {
+            type = deferredModule;
+            default = {};
+            description = "Module applied to each inhibition rule; matcher and equal lists concatenate unless overridden with module priorities.";
           };
         };
       }));
@@ -452,10 +485,13 @@ in {
       provider = "grafana";
       inherit (grafanaCfg) owner;
       settings = { inherit (grafanaCfg) url namespace; };
-      resources = lib.mapAttrs (_: folder: {
-        inherit (folder) uid title;
-        rules = lib.attrValues folder.rules;
-      }) grafanaCfg.folders;
+      resources = {
+        folders = lib.mapAttrs (_: folder: {
+          inherit (folder) uid title;
+          rules = lib.attrValues folder.rules;
+        }) grafanaCfg.folders;
+        inherit (grafanaCfg) inhibitionRules;
+      };
       sopsFile = grafanaCfg.sopsSecretsFile;
     });
 

@@ -8,10 +8,10 @@ from copy import deepcopy
 import re
 from urllib.parse import quote
 
-from . import Provider
-from ..http import API
-from ..resources import RemoteResource
-from ..utils import progress, require_env
+from .. import Provider
+from .client import GrafanaClient
+from ...resources import RemoteResource
+from ...utils import progress
 
 
 OWNERSHIP_ANNOTATION = "remote-sync/owner"
@@ -98,50 +98,17 @@ class Folder(RemoteResource):
         return self["uid"] == declaration["uid"]
 
 
-class Grafana(Provider):
+class Folders(GrafanaClient, Provider):
     resource_type = Folder
 
-    def __init__(self, *, url=None, namespace="default", api=None):
-        if api is None:
-            assert url, "Configure the Grafana instance URL."
-            api = API(url.rstrip("/"), require_env("GRAFANA_SERVICE_ACCOUNT_TOKEN"))
-        self.api = api
-        self.namespace = namespace
-        self.folders_path = f"/apis/folder.grafana.app/v1/namespaces/{quote(namespace, safe='')}/folders"
+    def __init__(self, **kwargs):
+        super().__init__(**kwargs)
+        self.folders_path = f"/apis/folder.grafana.app/v1/namespaces/{quote(self.namespace, safe='')}/folders"
         self.rule_locations = {}
         self.declared_rules = {}
 
-    def request(self, method, path, **kwargs):
-        try:
-            return self.api.request(method, path, **kwargs)
-        except (AssertionError, RuntimeError) as exc:
-            # Grafana paths contain resource IDs, never credentials. Keep the
-            # shared client's sanitized error rather than dumping response bodies.
-            raise RuntimeError(f"Grafana {method} {path}: {exc}") from None
-
-    def list_objects(self, path):
-        objects, seen_tokens = {}, set()
-        params = {"limit": 100}
-        while True:
-            page = self.request("GET", path, params=params)
-            for obj in page["items"]:
-                uid = obj["metadata"]["name"]
-                assert uid not in objects, "Grafana returned duplicate resource names; preview again."
-                objects[uid] = obj
-            token = page.get("metadata", {}).get("continue")
-            if not token:
-                break
-            assert token not in seen_tokens, "Grafana pagination repeated; preview again."
-            seen_tokens.add(token)
-            params = {"limit": 100, "continue": token}
-        return objects
-
     def list(self):
-        discovery = self.request("GET", f"/apis/{RULE_API_GROUP}")
-        available = {item["version"] for item in discovery["versions"]}
-        version = next((v for v in ("v1beta1", "v0alpha1") if v in available), None)
-        assert version, f"Grafana {RULE_API_GROUP} must serve v1beta1 or v0alpha1."
-        self.rule_api_version = f"{RULE_API_GROUP}/{version}"
+        self.rule_api_version = self.discover_version(RULE_API_GROUP)
         self.rules_path = f"/apis/{self.rule_api_version}/namespaces/{quote(self.namespace, safe='')}/alertrules"
         progress(f"  Using Grafana alert API {self.rule_api_version}.", detail=True)
         progress("  Fetching Grafana folders and alert rules...", detail=True)

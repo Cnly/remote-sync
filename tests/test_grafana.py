@@ -5,7 +5,7 @@ import pytest
 
 from conftest import FakeAPI
 from remote_sync.core import APIAdapter, ConfigAdapter
-from remote_sync.providers.grafana import Grafana
+from remote_sync.providers.grafana.folders import Folders
 
 
 FOLDERS = "/apis/folder.grafana.app/v1/namespaces/default/folders"
@@ -123,7 +123,7 @@ class GrafanaAPI:
 
 
 def plan(api, config=None, **kwargs):
-    remote = APIAdapter(provider=Grafana(api=api), owner="test",
+    remote = APIAdapter(provider=Folders(api=api), owner="test",
                         declarations=declarations() if config is None else config, **kwargs)
     desired = ConfigAdapter(desired=remote.desired)
     return remote, desired, remote.diff_from(desired)
@@ -171,7 +171,7 @@ def test_alpha_only_stack_updates_and_deletes_using_the_discovered_version():
 @pytest.mark.parametrize("versions", [("v0alpha1", "v1beta1"), ("v1beta1", "v0alpha1"), ("v2", "v1beta1")])
 def test_discovery_prefers_beta_over_alpha_or_unknown_versions(versions):
     api = FakeAPI(discovery(*versions), {"items": []}, {"items": []})
-    assert Grafana(api=api).list() == []
+    assert Folders(api=api).list() == []
     assert [path for _, path, _ in api.calls] == [DISCOVERY, FOLDERS, RULES]
 
 
@@ -179,7 +179,7 @@ def test_discovery_prefers_beta_over_alpha_or_unknown_versions(versions):
 def test_no_supported_api_version_stops_before_reading_resources_or_writing(versions):
     api = FakeAPI(discovery(*versions))
     with pytest.raises(AssertionError, match="must serve v1beta1 or v0alpha1"):
-        Grafana(api=api).list()
+        Folders(api=api).list()
     assert api.calls == [("GET", DISCOVERY, {})]
 
 
@@ -190,7 +190,7 @@ def test_api_read_error_identifies_the_endpoint_and_stops(path):
         responses.append({"items": []})
     api = FakeAPI(*responses, AssertionError("API returned HTTP 404"))
     with pytest.raises(RuntimeError) as error:
-        Grafana(api=api).list()
+        Folders(api=api).list()
     assert str(error.value) == f"Grafana GET {path}: API returned HTTP 404"
     assert api.token not in str(error.value)
     assert api.calls[-1][:2] == ("GET", path)
@@ -354,7 +354,7 @@ def test_both_lists_follow_pagination_and_use_resource_names_as_identity():
                   {"items": [folder("second")], "metadata": {}},
                   {"items": [rule()], "metadata": {"continue": "rules-next"}},
                   {"items": [rule("second-alert")], "metadata": {}})
-    items = Grafana(api=api).list()
+    items = Folders(api=api).list()
     assert [item.id for item in items] == ["infra", "second"]
     assert set(items[0]["rules"]) == {"host-down", "second-alert"}
     assert api.calls[2] == ("GET", FOLDERS, {"params": {"limit": 100, "continue": "folders-next"}})
@@ -368,12 +368,12 @@ def test_list_rejects_repeated_pagination_tokens_or_resource_names(path, duplica
     page = {"items": [obj] if duplicate else [], "metadata": {"continue": "same"}}
     api = FakeAPI(discovery("v1beta1"), *([{"items": []}] if path == RULES else []), page, page)
     with pytest.raises(AssertionError, match="duplicate resource names|pagination repeated"):
-        Grafana(api=api).list()
+        Folders(api=api).list()
 
 
 def test_namespace_is_used_for_both_resource_apis():
     api = FakeAPI(discovery("v1beta1"), {"items": []}, {"items": []})
-    Grafana(api=api, namespace="stacks-123").list()
+    Folders(api=api, namespace="stacks-123").list()
     assert [path for _, path, _ in api.calls] == [
         DISCOVERY,
         FOLDERS.replace("/default/", "/stacks-123/"), RULES.replace("/default/", "/stacks-123/"),

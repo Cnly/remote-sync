@@ -1,7 +1,7 @@
 # Remote sync
 
-Declarative reconciliation for Grafana alert folders, HetrixTools HTTP monitors,
-Healthchecks.io checks, and Tailscale Services. Each run reads the API, uses
+Declarative reconciliation for Grafana alert folders and inhibition rules,
+HetrixTools HTTP monitors, Healthchecks.io checks, and Tailscale Services. Each run reads the API, uses
 DiffSync to compare it with configuration, and previews changes. `--doit` applies
 the plan. There is no persistent state file or background reconciliation.
 
@@ -24,13 +24,18 @@ All apps accept:
 | --- | --- |
 | `--doit` | Discover, preview, and apply the full plan, including removals. |
 | `-v`, `--verbose` | Show detailed API reads and ownership operations. |
-| `-l`, `--list` | Print provider inventory as JSON keyed by remote ID. |
-| `--adopt KEY=ID` | Select an existing resource within the full plan; repeatable. |
+| `-l`, `--list` | Print inventory keyed by remote ID; Grafana groups it under `folders` and `inhibitionRules`. |
+| `--adopt KEY=ID` | Select an existing resource within the full plan; repeatable. Grafana adoption targets folders. |
 | `--help` | Show help without decrypting credentials. |
 
 Plans and inventory go to stdout; progress, retries, and errors go to stderr.
 `--list` skips ownership resolution, HetrixTools private notes, and Tailscale host
 approvals. It cannot be combined with `--doit` or `--adopt`.
+
+Each collection keeps its detailed diff and resource-name summary. Previews with
+multiple collections end with an overview of each collection's operation counts,
+including zero-change collections. Counts refer to managed resources: changing
+several alerts within one Grafana folder counts as one folder update.
 
 ## Flake configuration
 
@@ -93,7 +98,8 @@ by their declaration key.
 | HetrixTools | Standalone private-note line | Exact target URL and HTTP method | Delete owned monitor |
 | Healthchecks | Tag | Exact slug | Pause owned check |
 | Tailscale | Standalone comment line | Exact service name (`svc:…`) | Delete owned service |
-| Grafana | Folder `remote-sync/owner` annotation | Exact UID of a folder with no alerts | Clear alerts; retain folder and dashboards |
+| Grafana folders | Folder `remote-sync/owner` annotation | Exact UID of a folder with no alerts | Clear alerts; retain folder and dashboards |
+| Grafana inhibition rules | Immutable `nix-sync-<owner>--<key>` name | Adoption unsupported | Delete owned rule |
 
 Adoption attaches ownership and reconciles settings in the same apply, preserving
 other notes, comments, or tags used alongside the marker. Unrelated unowned
@@ -221,6 +227,60 @@ Contact points, notification policies, data sources, and Alloy configuration are
 managed separately. Uses the [v1 folder API](https://grafana.com/docs/grafana/latest/developer-resources/api-reference/http-api/folder/)
 and [AlertRule API](https://grafana.com/whats-new/2026-10-22-new-alertrule-and-recordingrule-apis-for-grafana-managed-alerts/).
 
+### Grafana notification inhibition
+
+`grafana.inhibitionRules` declares native `InhibitionRule` resources for Grafana's
+built-in Alertmanager. `nix run .#grafana` previews both folders/alert rules and
+inhibition rules; `nix run .#grafana -- --doit` applies both plans. Discovery and
+declaration validation for both resource sets finish before any writes, so an
+inhibition API or permission error during discovery prevents folder changes too.
+`--adopt KEY=FOLDER_UID` still selects folders within the complete plan.
+
+The inhibition handler discovers `notifications.alerting.grafana.app`, preferring
+`v1beta1` and using `v0alpha1` when available. Unsupported APIs fail with the requested endpoint;
+there is no fallback to replacing the full Alertmanager configuration.
+
+```nix
+grafana.inhibitionRuleDefaults = {
+  source_matchers = [{ label = "managed_by"; value = "nix"; }];
+  target_matchers = [{ label = "managed_by"; value = "nix"; }];
+};
+grafana.inhibitionRules.unit-failed = {
+  source_matchers = [{ label = "alertname"; value = "Systemd unit failed"; }];
+  target_matchers = [{
+    label = "alertname";
+    type = "=~";
+    value = "Required systemd unit is not active|Systemd service keeps restarting";
+  }];
+  equal = [ "host" "container" "name" ];
+};
+```
+
+Matchers use the API's `label`, `type`, and `value` fields; `type` defaults to `=`.
+Matchers within each list are ANDed. `inhibitionRuleDefaults` is a module, so
+matcher lists concatenate and normal priorities/conditions apply. `equal` lists
+the labels whose values must agree between source and target; missing and empty
+values are equivalent. Omitting it allows inhibition across all label values.
+Only a firing source suppresses notifications; target alert states and evaluation
+are unchanged. Both alerts must reach the same Alertmanager.
+
+The API does not retain custom ownership annotations. Resource names therefore
+reserve `nix-sync-<owner>--<key>` for this app. The full name must be a lowercase
+DNS name of at most 40 characters, and the owner must not contain `--`. Keep keys
+stable: renaming one creates a new rule and deletes the old one. Removing a
+declaration deletes its owned rule, including when `inhibitionRules = {}`. Rules
+outside this owner's prefix, and rules with external provisioning provenance,
+are preserved. Names are immutable, so adopting existing rules is unsupported.
+Updates and deletions use resource-version preconditions and stop on conflicts.
+The inhibition API is read even when declarations are empty, so removing the last
+rule still reconciles its deletion.
+
+The service account needs `alert.notifications.inhibition-rules:read`, `:write`,
+and `:delete` permissions for these rules (or the broader notification read/write
+permissions). Folder and alert-rule permissions alone are insufficient. See
+[Grafana's inhibition documentation](https://grafana.com/docs/grafana/latest/alerting/configure-notifications/inhibition-rules/)
+for API availability and notification semantics.
+
 ### Healthchecks
 
 `slug` defaults to the key. `name` defaults to the slug and is set only on
@@ -290,7 +350,8 @@ GRAFANA_SERVICE_ACCOUNT_TOKEN: "your-service-account-token"
   in memory; the client determines the tailnet.
 - **Grafana:** a Grafana instance service account with folder read/create/write
   permissions and alert-rule read/create/update/delete permissions on the managed
-  folders. The new API uses alert-rule permissions, rather than the legacy
+  folders, plus inhibition-rule read/write/delete permissions described above.
+  The new API uses alert-rule permissions, rather than the legacy
   provisioning role. This is separate from Alloy's Cloud access-policy tokens
   for sending metrics and logs.
 
@@ -315,11 +376,16 @@ none is usable. GET requests receiving 502/503/504 retry at most twice, provided
 the delay is at most 30 seconds. Other failures stop the run. Ctrl-C prints
 `Interrupted.` and exits with status 130.
 
-[Providers](remote_sync/providers/) handle API discovery and writes;
+[Providers](remote_sync/providers/) expose resource collections through
+`collections(owner=..., declarations=..., adoptions=...)`. The default supplies
+one unnamed collection; [Grafana](remote_sync/providers/grafana/) supplies named
+folder/alert and inhibition collections, and routes explicit adoptions to folders.
+Each collection pairs a resource handler with its declarations and adoptions.
+Handlers perform API discovery and writes;
 [RemoteResource](remote_sync/resources.py) supplies ownership and normalization.
-[Core adapters](remote_sync/core.py) match resources and prepare settings for
-DiffSync, which compares models and invokes callbacks to create, update, or delete
-resources.
+The [core adapters](remote_sync/core.py) match resources and prepare settings for
+DiffSync. The [CLI](remote_sync/cli.py) selects the provider, computes and displays
+every plan and summary, then applies changes when requested.
 
 From this directory:
 

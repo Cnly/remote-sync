@@ -4,7 +4,8 @@ import json
 import pytest
 
 from conftest import FakeAPI
-from remote_sync.core import APIAdapter, ConfigAdapter, Resource, print_plan
+from remote_sync.cli import print_plan
+from remote_sync.core import APIAdapter, ConfigAdapter, Resource
 from remote_sync.providers.healthchecks import Healthchecks
 
 

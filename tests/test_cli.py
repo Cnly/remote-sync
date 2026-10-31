@@ -4,6 +4,8 @@ import sys
 import pytest
 
 from remote_sync import cli
+from remote_sync.core import APIAdapter
+from remote_sync.providers import Collection
 from test_core import Provider, resource
 
 
@@ -26,7 +28,7 @@ def test_unknown_provider_is_rejected_before_reading_config(capsys):
 
 
 def test_provider_connection_settings_are_passed_separately_from_resources(tmp_path, monkeypatch):
-    config = tmp_path / "grafana.json"
+    config = tmp_path / "config.json"
     config.write_text(json.dumps({
         "owner": "test", "resources": {},
         "settings": {"url": "https://example.grafana.net", "namespace": "stacks-123"},
@@ -37,8 +39,8 @@ def test_provider_connection_settings_are_passed_separately_from_resources(tmp_p
         received.append(settings)
         return Provider()
 
-    monkeypatch.setitem(cli.PROVIDERS, "grafana", provider)
-    cli.run(["grafana", "--config-file", str(config)])
+    monkeypatch.setitem(cli.PROVIDERS, "hetrixtools", provider)
+    cli.run(["hetrixtools", "--config-file", str(config)])
     assert received == [{"url": "https://example.grafana.net", "namespace": "stacks-123"}]
 
 
@@ -46,7 +48,9 @@ def test_provider_connection_settings_are_passed_separately_from_resources(tmp_p
 def test_cli_only_applies_with_doit(tmp_path, monkeypatch, capsys, arguments, applied):
     provider = Provider(resource("api"))
     assert invoke(tmp_path, monkeypatch, provider, *arguments) == 0
-    assert "UPDATE api" in capsys.readouterr().out
+    output = capsys.readouterr().out
+    assert "UPDATE api" in output and "Update (1):\n    api" in output
+    assert "Overall summary:" not in output
     assert bool(provider.writes) == applied
     assert provider.resources["id"]["value"] == (2 if applied else 1)
 
@@ -108,3 +112,51 @@ def test_interrupt_exits_quietly_during_discovery_or_apply(tmp_path, monkeypatch
     assert "Traceback" not in output.err and "Error:" not in output.err
     assert "Applied." not in output.out
     assert not provider.writes
+
+
+def test_later_collection_diff_failure_prevents_all_writes(monkeypatch, capsys):
+    first, second = Provider(resource("api")), Provider(resource("api"))
+    diff_from = APIAdapter.diff_from
+
+    def checked_diff(remote, desired):
+        if remote.provider is second:
+            raise ValueError("Cannot compare the second collection")
+        return diff_from(remote, desired)
+
+    monkeypatch.setattr(APIAdapter, "diff_from", checked_diff)
+    with pytest.raises(ValueError, match="Cannot compare"):
+        cli.reconcile({
+            "first": Collection(first, {"api": {"value": 2}}),
+            "second": Collection(second, {"api": {"value": 2}}),
+        }, owner="test", doit=True)
+    assert first.reads == second.reads == [("list",)]
+    assert not first.writes and not second.writes
+    assert capsys.readouterr().out == ""
+
+
+def test_collection_overview_preserves_details_and_counts_adoptions_once(capsys):
+    first = Provider({"id": "manual", "name": "manual", "value": 1},
+                     resource("changed", "changed"), resource("removed", "removed"))
+    second = Provider()
+    cli.reconcile({
+        "first": Collection(first, {
+            "adopted": {"value": 2}, "changed": {"value": 2}, "new": {"value": 3},
+        }, {"adopted": "manual"}),
+        "second": Collection(second, {}),
+    }, owner="test")
+    details, overview = capsys.readouterr().out.split("Overall summary:\n")
+    assert all(action in details for action in (
+        "ADOPT (first) adopted (manual)", "CREATE (first) new",
+        "UPDATE (first) changed", "DELETE (first) removed",
+    ))
+    assert "Adopt (1):\n    adopted" in details
+    assert "Create (1):\n    new" in details
+    assert "Update (1):\n    changed" in details
+    assert "Delete (1):\n    removed" in details
+    assert "\n\n=== second ===\n\nNo changes.\n\n" in details
+    assert [line.split() for line in overview.splitlines()] == [
+        ["Collection", "Adopt", "Create", "Update", "Delete"],
+        ["first", "1", "1", "1", "1"],
+        ["second", "0", "0", "0", "0"],
+    ]
+    assert not first.writes and not second.writes

@@ -4,7 +4,7 @@ from copy import deepcopy
 import pytest
 
 from conftest import FakeAPI, het_page
-from remote_sync.core import print_plan
+from remote_sync.cli import print_plan
 from remote_sync.providers.hetrixtools import HetrixTools
 from remote_sync.http import API
 from test_core import apply, plan

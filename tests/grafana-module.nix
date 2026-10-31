@@ -38,6 +38,20 @@ let
               disabled = lib.mkIf false { title = "Not declared"; };
             };
           };
+          inhibitionRuleDefaults = {
+            source_matchers = [{ label = "managed_by"; value = "nix"; }];
+            target_matchers = [{ label = "managed_by"; value = "nix"; }];
+            equal = lib.mkDefault [ "host" ];
+          };
+          inhibitionRules = {
+            unit-failed = {
+              source_matchers = [{ label = "alertname"; value = "Unit failed"; }];
+              target_matchers = [{ label = "alertname"; type = "=~"; value = "Unit inactive|Unit restarting"; }];
+              equal = [ "host" "container" "name" ];
+            };
+            host-missing = {};
+            disabled = lib.mkIf false {};
+          };
         };
       })
     ];
@@ -64,6 +78,11 @@ assert first.notificationSettings == { type = "SimplifiedRouting"; receiver = "e
 assert second.for == "5m" && second.trigger.interval == "2m";
 assert second.labels.severity == "warning" && second.expressions.A.source;
 assert second.noDataState == "NoData" && second.keepFiringFor == "0s" && !second.paused;
+assert builtins.attrNames cfg.grafana.inhibitionRules == [ "host-missing" "unit-failed" ];
+assert cfg.grafana.inhibitionRules.host-missing.equal == [ "host" ];
+assert cfg.grafana.inhibitionRules.unit-failed.equal == [ "host" "container" "name" ];
+assert builtins.length cfg.grafana.inhibitionRules.unit-failed.source_matchers == 2;
+assert builtins.all (matcher: matcher.type == "=") cfg.grafana.inhibitionRules.unit-failed.source_matchers;
 # Building the real launcher also checks that deferred ruleDefaults modules
 # are excluded from the generated JSON. Do not run SOPS or contact Grafana.
 pkgs.runCommand "grafana-module-check" {} ''

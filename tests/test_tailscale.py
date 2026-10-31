@@ -5,7 +5,7 @@ from urllib.parse import unquote
 import pytest
 import requests
 
-from remote_sync.core import print_plan
+from remote_sync.cli import print_plan
 from remote_sync.providers.tailscale import Tailscale
 from test_core import apply, plan
 from test_http import Response, Session

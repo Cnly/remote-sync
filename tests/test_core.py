@@ -2,7 +2,8 @@ from copy import deepcopy
 
 import pytest
 
-from remote_sync.core import APIAdapter, ConfigAdapter, Resource, print_plan
+from remote_sync.cli import print_plan
+from remote_sync.core import APIAdapter, ConfigAdapter, Resource
 from remote_sync.providers import Provider as BaseProvider
 from remote_sync.resources import RemoteResource
 

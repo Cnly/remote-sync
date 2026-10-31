@@ -1,12 +1,31 @@
 from abc import ABC, abstractmethod
+from dataclasses import dataclass, field
 
 from ..resources import RemoteResource
 
 
+@dataclass
+class Collection:
+    """One resource handler with its declarations and explicit adoptions."""
+
+    provider: "Provider"
+    declarations: dict
+    adoptions: dict = field(default_factory=dict)
+
+
 class Provider(ABC):
-    """Interface for reading and changing resources in a remote service."""
+    """Reads and changes one resource type, exposed as a single collection by default."""
 
     resource_type = RemoteResource
+
+    def collections(self, *, owner, declarations, adoptions) -> dict[str, Collection]:
+        """Prepare collections without API reads or writes.
+
+        The empty name denotes a sole collection with flat inventory and no plan
+        heading. Services with multiple resource types provide named collections
+        and route declarations and adoptions to their respective handlers.
+        """
+        return {"": Collection(self, declarations, adoptions)}
 
     @abstractmethod
     def list(self) -> list[RemoteResource]:

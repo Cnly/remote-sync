@@ -1,6 +1,3 @@
-import difflib
-import json
-
 from diffsync import Adapter, DiffSyncModel
 
 from .providers import Provider
@@ -160,35 +157,3 @@ class APIAdapter(Adapter):
     def delete_remote(self, resource):
         progress(f"Deleting {resource.key} ({resource.remote_id})...")
         self.provider.delete(self.inventory[resource.remote_id])
-
-
-def print_plan(diff, remote=None):
-    if not diff.has_diffs():
-        print("No changes.")
-        return
-    action_order = {"create": 1, "update": 2, "delete": 3}
-    summary = {"adopt": [], "create": [], "update": [], "delete": []}
-    changes = (change for change in diff.get_children() if change.action)
-    for change in sorted(changes, key=lambda change: (
-        0 if remote and change.name in remote.pending_adoptions else action_order[change.action]
-    )):
-        if remote and change.name in remote.pending_adoptions:
-            summary["adopt"].append(change.name)
-            print(f"ADOPT {change.name} ({remote.get(Resource, change.name).remote_id})")
-        else:
-            summary[change.action].append(change.name)
-            print(f"{change.action.upper()} {change.name}")
-        desired = change.source_attrs.get("settings", {}) if change.source_attrs else {}
-        live = change.dest_attrs.get("settings", {}) if change.dest_attrs else {}
-        for line in difflib.unified_diff(
-            json.dumps(live, indent=2, sort_keys=True).splitlines(),
-            json.dumps(desired, indent=2, sort_keys=True).splitlines(),
-            fromfile="remote", tofile="config", lineterm="",
-        ):
-            print(f" |  {line}")
-        print()
-    print("Summary:")
-    for category, names in summary.items():
-        print(f"  {category.capitalize()} ({len(names)}):{'' if names else ' none'}")
-        for name in names:
-            print(f"    {name}")
