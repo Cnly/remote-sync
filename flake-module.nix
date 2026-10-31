@@ -1,11 +1,132 @@
 { lib, config, ... }: let
 
   inherit (lib) mkOption;
-  inherit (lib.types) attrsOf bool deferredModule int listOf nullOr path str submodule;
+  inherit (lib.types) anything attrsOf bool deferredModule int listOf nullOr path str submodule;
 
+  grafanaCfg = config.grafana;
   hetrixCfg = config.hetrixtools;
   healthchecksCfg = config.healthchecks;
   tailscaleCfg = config.tailscale;
+
+  alertRuleModule = { name, ... }: {
+    # Keep API query models and optional rule fields extensible. Native module
+    # merging still applies to expressions, labels, annotations, and defaults.
+    freeformType = attrsOf anything;
+    options = {
+      uid = mkOption {
+        type = str;
+        default = name;
+        description = "Globally unique Grafana rule UID. Keep it stable to preserve rule identity.";
+      };
+      title = mkOption {
+        type = str;
+        default = name;
+        description = "Human-readable alert rule title.";
+      };
+      trigger.interval = mkOption {
+        type = str;
+        default = "1m";
+        description = "Evaluation interval as a positive Grafana duration in whole seconds, such as 1m.";
+      };
+      expressions = mkOption {
+        description = "v1beta1 expressions keyed by refId. Exactly one must set source = true.";
+        type = attrsOf (submodule {
+          options = {
+            model = mkOption {
+              type = attrsOf anything;
+              description = "Data source query or Grafana expression model.";
+            };
+            datasourceUID = mkOption {
+              type = str;
+              default = "__expr__";
+              description = "Data source UID; defaults to Grafana's expression engine.";
+            };
+            queryType = mkOption {
+              type = str;
+              default = "";
+              description = "Query type, if required by the data source.";
+            };
+            relativeTimeRange = mkOption {
+              default = {};
+              type = submodule {
+                options = lib.genAttrs [ "from" "to" ] (field: mkOption {
+                  type = str;
+                  default = "0s";
+                  description = "${field} offset from now as a Grafana duration.";
+                });
+              };
+              description = "Query time range as duration strings; data source queries need from greater than to.";
+            };
+            source = mkOption {
+              type = bool;
+              default = false;
+              description = "Use this expression as the final alert condition.";
+            };
+          };
+        });
+      };
+      for = mkOption {
+        type = str;
+        default = "0s";
+        description = "Pending duration before firing, in Grafana duration syntax.";
+      };
+      keepFiringFor = mkOption {
+        type = str;
+        default = "0s";
+        description = "Duration to keep firing after the condition clears.";
+      };
+      noDataState = mkOption {
+        type = lib.types.enum [ "NoData" "Ok" "Alerting" "KeepLast" ];
+        default = "NoData";
+        description = "Grafana state when the query returns no data.";
+      };
+      execErrState = mkOption {
+        type = lib.types.enum [ "Error" "Ok" "Alerting" "KeepLast" ];
+        default = "Error";
+        description = "Grafana state when evaluating the query fails.";
+      };
+      paused = mkOption {
+        type = bool;
+        default = false;
+        description = "Whether evaluation of this rule is paused.";
+      };
+      labels = mkOption {
+        type = attrsOf str;
+        default = {};
+        description = "Alert labels, including labels used by notification policies.";
+      };
+      annotations = mkOption {
+        type = attrsOf str;
+        default = {};
+        description = "Alert annotations, such as summary and description.";
+      };
+    };
+  };
+
+  alertFolderModule = { config, name, ... }: {
+    options = {
+      uid = mkOption {
+        type = str;
+        default = name;
+        description = "Stable Grafana folder UID; matching uses this UID, not the title.";
+      };
+      title = mkOption {
+        type = str;
+        default = name;
+        description = "Grafana folder title.";
+      };
+      rules = mkOption {
+        type = attrsOf (submodule [ alertRuleModule config.ruleDefaults ]);
+        default = {};
+        description = "Complete set of AlertRule resources in this dedicated folder. Omitted rules are removed; recording rules are not managed.";
+      };
+      ruleDefaults = mkOption {
+        type = deferredModule;
+        default = {};
+        description = "Module applied to every alert rule in the folder; use mkDefault for overridable defaults.";
+      };
+    };
+  };
 
   serviceModule = { name, ... }: {
     options = {
@@ -176,6 +297,41 @@
 in {
 
   options = {
+    grafana = mkOption {
+      default = null;
+      description = "Grafana alert-folder reconciliation; configure this to expose the grafana app.";
+      type = nullOr (submodule ({ config, ... }: {
+        options = {
+          owner = mkOption {
+            type = str;
+            description = "Stable namespace stored in the folder's remote-sync/owner annotation.";
+          };
+          url = mkOption {
+            type = str;
+            description = "Grafana instance URL, including any subpath; this is not the Prometheus remote-write URL.";
+          };
+          namespace = mkOption {
+            type = str;
+            default = "default";
+            description = "Grafana API namespace: default for the first OSS organization, stacks-<STACK_ID> for Grafana Cloud.";
+          };
+          sopsSecretsFile = mkOption {
+            type = path;
+            description = "SOPS-encrypted YAML file supplying GRAFANA_SERVICE_ACCOUNT_TOKEN at runtime.";
+          };
+          folders = mkOption {
+            type = attrsOf (submodule [ alertFolderModule config.folderDefaults ]);
+            default = {};
+            description = "Dedicated alert folders matched by UID. Removing a declaration clears its alerts but retains the folder and dashboards.";
+          };
+          folderDefaults = mkOption {
+            type = deferredModule;
+            default = {};
+            description = "Module applied to every folder; use mkDefault for overridable defaults.";
+          };
+        };
+      }));
+    };
     tailscale = mkOption {
       default = null;
       description = "Tailscale reconciliation; currently manages Services and their host approvals.";
@@ -271,7 +427,7 @@ in {
     remote-sync = pkgs.python3Packages.callPackage ./package.nix {};
 
     mkLauncherApp = {
-      provider, owner, resources, sopsFile,
+      provider, owner, resources, sopsFile, settings ? {},
     }: {
       type = "app";
       program = lib.getExe (pkgs.writeShellApplication {
@@ -282,7 +438,7 @@ in {
           REMOTE_SYNC = lib.getExe remote-sync;
           REMOTE_SYNC_PROVIDER = provider;
           REMOTE_SYNC_CONFIG_FILE = (jsonFormat.generate "${provider}.json" {
-            inherit owner resources;
+            inherit owner resources settings;
           }).overrideAttrs (_: localDrvArgs);
           SECRETS_FILE = sopsFile;
         };
@@ -291,6 +447,17 @@ in {
     };
 
   in {
+
+    apps.grafana = lib.mkIf (grafanaCfg != null) (mkLauncherApp {
+      provider = "grafana";
+      inherit (grafanaCfg) owner;
+      settings = { inherit (grafanaCfg) url namespace; };
+      resources = lib.mapAttrs (_: folder: {
+        inherit (folder) uid title;
+        rules = lib.attrValues folder.rules;
+      }) grafanaCfg.folders;
+      sopsFile = grafanaCfg.sopsSecretsFile;
+    });
 
     apps.tailscale-svc = lib.mkIf (tailscaleCfg != null) (mkLauncherApp {
       provider = "tailscale";

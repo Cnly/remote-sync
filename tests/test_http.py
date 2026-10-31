@@ -46,7 +46,7 @@ def test_empty_responses_can_skip_json_but_still_check_http_status(status):
     assert "expect_json" not in session.calls[0][1]
 
 
-@pytest.mark.parametrize("status", [400, 403, 500, 502, 503, 504])
+@pytest.mark.parametrize("status", [400, 403, 409, 500, 502, 503, 504])
 def test_mutations_are_not_retried_after_other_failures(status):
     session = Session(Response(status))
     with pytest.raises(AssertionError, match=str(status)):

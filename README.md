@@ -1,9 +1,9 @@
 # Remote sync
 
-Declarative reconciliation for HetrixTools HTTP monitors, Healthchecks.io checks,
-and Tailscale Services. Each run reads the API, uses DiffSync to compare it with
-configuration, and previews changes. `--doit` applies the plan. There is no
-persistent state file or background reconciliation.
+Declarative reconciliation for Grafana alert folders, HetrixTools HTTP monitors,
+Healthchecks.io checks, and Tailscale Services. Each run reads the API, uses
+DiffSync to compare it with configuration, and previews changes. `--doit` applies
+the plan. There is no persistent state file or background reconciliation.
 
 ## Usage
 
@@ -14,6 +14,8 @@ nix run .#hetrixtools
 nix run .#healthchecks
 nix run .#tailscale-svc
 nix run .#tailscale-svc -- --doit
+nix run .#grafana
+nix run .#grafana -- --doit
 ```
 
 All apps accept:
@@ -91,6 +93,7 @@ by their declaration key.
 | HetrixTools | Standalone private-note line | Exact target URL and HTTP method | Delete owned monitor |
 | Healthchecks | Tag | Exact slug | Pause owned check |
 | Tailscale | Standalone comment line | Exact service name (`svc:…`) | Delete owned service |
+| Grafana | Folder `remote-sync/owner` annotation | Exact UID of a folder with no alerts | Clear alerts; retain folder and dashboards |
 
 Adoption attaches ownership and reconciles settings in the same apply, preserving
 other notes, comments, or tags used alongside the marker. Unrelated unowned
@@ -144,6 +147,79 @@ Locations use v3 names, translated to v2 write codes by the provider. This
 repository defaults to New York, San Francisco, Singapore, and Tokyo, alerts
 after three minutes, and enables public reports. Categories are empty unless
 declared; d0nuts declarations set `d0nuts.im`.
+
+### Grafana alerts
+
+The optional `grafana` configuration manages dedicated alert folders and their
+individual `AlertRule` resources. Set `url` to the Grafana UI URL, not a metrics
+ingestion endpoint. `namespace` defaults to `default` for the first OSS organization;
+Grafana Cloud uses `stacks-<STACK_ID>` (shown in the instance's `/swagger` page).
+The provider discovers versions from `/apis/rules.alerting.grafana.app`, preferring
+`v1beta1` and using `v0alpha1` when that is the supported version. Both use the new
+AlertRule API; there is no fallback to the deprecated provisioning API. Availability
+can differ between Cloud stacks running the same Grafana version.
+
+```nix
+grafana = {
+  owner = "flake";
+  url = "https://your-stack.grafana.net";
+  namespace = "stacks-123";
+  sopsSecretsFile = ./secrets.yaml;
+  folders.infrastructure = {
+    title = "Infrastructure";
+    ruleDefaults = {
+      trigger.interval = lib.mkDefault "1m";
+      for = lib.mkDefault "5m";
+    };
+    rules.example-host-missing = {
+      title = "Example host stopped reporting";
+      expressions.A = {
+        datasourceUID = "your-prometheus-data-source-uid";
+        relativeTimeRange = { from = "10m"; to = "0s"; };
+        model = {
+          expr = ''absent_over_time(node_time_seconds{host="example"}[5m]) or on() vector(0)'';
+          instant = true;
+          range = false;
+        };
+      };
+      expressions.B = {
+        source = true;
+        model = { type = "math"; expression = "$A > 0"; };
+      };
+    };
+  };
+};
+```
+
+Folder and rule `uid` values default to their attribute keys. Rule UIDs must be
+globally unique and stay in the same folder; move an existing rule explicitly
+before changing its declared location. The UID is the API's `metadata.name`,
+distinct from its internal `metadata.uid`. `folderDefaults` and each folder's
+`ruleDefaults` are modules, with normal Nix merging and priorities. Expressions
+merge by their attribute keys; exactly one sets `source = true` as the condition.
+Each rule's `trigger.interval` defaults to `"1m"`; no evaluation group is created.
+
+Rule fields follow the v1beta1 spec: `keepFiringFor`, `paused`, and the state
+values `Ok` and `KeepLast`. Durations, including query time ranges, are strings.
+Optional fields such as `panelRef`, `missingSeriesEvalsToResolve`, and
+`notificationSettings` can be declared directly. Notification settings require
+`type = "SimplifiedRouting"` with `receiver`, or `type = "NamedRoutingTree"`
+with `routingTree`. Omit them to use the default notification policy tree.
+
+Ownership is `nix-sync-<owner>` on the folder. **All AlertRule resources in an
+owned folder are managed**, including manually added rules. Use dedicated folders:
+omitted rules are removed on apply. A matching folder with no alert rules is
+adopted automatically; adopting a folder that already contains alerts requires
+`--adopt KEY=FOLDER_UID`, and the preview shows its complete reconciliation.
+Removing a folder declaration clears its alert rules and retains the folder,
+its ownership marker, dashboards, and other metadata. An empty `rules = {}` has
+the same alert-clearing behavior. RecordingRule resources and rule sequences
+are not managed by this provider.
+
+Edit managed rules in their declarations; subsequent applies reconcile UI edits.
+Contact points, notification policies, data sources, and Alloy configuration are
+managed separately. Uses the [v1 folder API](https://grafana.com/docs/grafana/latest/developer-resources/api-reference/http-api/folder/)
+and [AlertRule API](https://grafana.com/whats-new/2026-10-22-new-alertrule-and-recordingrule-apis-for-grafana-managed-alerts/).
 
 ### Healthchecks
 
@@ -201,6 +277,7 @@ HETRIXTOOLS_API_TOKEN: "your-api-token"
 HETRIXTOOLS_CONTACT_LIST_ID: "your-contact-list-id"
 HEALTHCHECKS_API_KEY: "your-management-api-key"
 TAILSCALE_OAUTH_CLIENT_SECRET: "your-client-secret"
+GRAFANA_SERVICE_ACCOUNT_TOKEN: "your-service-account-token"
 ```
 
 - **HetrixTools:** v3 GET monitors, GET private notes, and POST private notes;
@@ -211,6 +288,11 @@ TAILSCALE_OAUTH_CLIENT_SECRET: "your-client-secret"
 - **Tailscale:** an OAuth client with write access to `services` and `devices:core`.
   Only the client secret is configured. Access tokens are obtained and renewed
   in memory; the client determines the tailnet.
+- **Grafana:** a Grafana instance service account with folder read/create/write
+  permissions and alert-rule read/create/update/delete permissions on the managed
+  folders. The new API uses alert-rule permissions, rather than the legacy
+  provisioning role. This is separate from Alloy's Cloud access-policy tokens
+  for sending metrics and logs.
 
 Keep credentials out of Nix values. The launcher preserves the inherited
 environment, with SOPS values overriding matching variables.
@@ -222,6 +304,11 @@ rereading resources. Use one writer per account during a run. There is no
 transaction or rollback: earlier successful writes remain after a later failure.
 Preview again after failures; newly created HetrixTools monitors can be adopted
 if ownership tagging failed, and Tailscale can retry unfinished host approvals.
+Grafana marks a folder before writing its rules, so another preview/apply can
+finish a partial apply without recreating successful resources. It includes
+`resourceVersion` on updates and version/identity preconditions on rule deletes.
+A conflict stops the run; preview again to review the intervening changes.
+Runtime status and server metadata are excluded from configuration comparisons.
 
 HTTP 429 retries indefinitely using the advertised cooldown, or 60 seconds when
 none is usable. GET requests receiving 502/503/504 retry at most twice, provided

@@ -75,6 +75,7 @@ class API:
                         read_retries += 1
                     time.sleep(delay)
                     continue
+            assert response.status_code != 409, "API returned HTTP 409 (conflict); preview again before retrying."
             assert 200 <= response.status_code < 300, (
                 f"API returned HTTP {response.status_code}; check permissions/limits and preview again."
             )

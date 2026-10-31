@@ -10,6 +10,7 @@ import pytest
 @pytest.mark.parametrize(("provider", "token_name"), [
     ("hetrixtools", "HETRIXTOOLS_API_TOKEN"), ("healthchecks", "HEALTHCHECKS_API_KEY"),
     ("tailscale", "TAILSCALE_OAUTH_CLIENT_SECRET"),
+    ("grafana", "GRAFANA_SERVICE_ACCOUNT_TOKEN"),
 ])
 def test_launcher_preserves_arguments_and_environment_with_sops_overrides(tmp_path, provider, token_name):
     sops = tmp_path / "sops"

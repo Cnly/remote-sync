@@ -25,6 +25,23 @@ def test_unknown_provider_is_rejected_before_reading_config(capsys):
     assert "invalid choice" in capsys.readouterr().err
 
 
+def test_provider_connection_settings_are_passed_separately_from_resources(tmp_path, monkeypatch):
+    config = tmp_path / "grafana.json"
+    config.write_text(json.dumps({
+        "owner": "test", "resources": {},
+        "settings": {"url": "https://example.grafana.net", "namespace": "stacks-123"},
+    }))
+    received = []
+
+    def provider(**settings):
+        received.append(settings)
+        return Provider()
+
+    monkeypatch.setitem(cli.PROVIDERS, "grafana", provider)
+    cli.run(["grafana", "--config-file", str(config)])
+    assert received == [{"url": "https://example.grafana.net", "namespace": "stacks-123"}]
+
+
 @pytest.mark.parametrize("arguments, applied", [((), False), (("--doit",), True)])
 def test_cli_only_applies_with_doit(tmp_path, monkeypatch, capsys, arguments, applied):
     provider = Provider(resource("api"))

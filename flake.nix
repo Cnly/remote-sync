@@ -18,6 +18,7 @@
         packages.remote-sync = pkgs.python3Packages.callPackage ./package.nix {};
         packages.default = config.packages.remote-sync;
         checks.remote-sync = config.packages.remote-sync;
+        checks.grafana-module = import ./tests/grafana-module.nix { inherit (pkgs) lib; inherit pkgs; };
 
         devShells.default = pkgs.mkShell {
           inputsFrom = [ config.packages.remote-sync ];

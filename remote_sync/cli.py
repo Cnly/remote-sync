@@ -8,13 +8,19 @@ import structlog
 
 from . import utils
 from .core import APIAdapter, ConfigAdapter, print_plan
+from .providers.grafana import Grafana
 from .providers.healthchecks import Healthchecks
 from .providers.hetrixtools import HetrixTools
 from .providers.tailscale import Tailscale
 from .utils import progress
 
 
-PROVIDERS = {"hetrixtools": HetrixTools, "healthchecks": Healthchecks, "tailscale": Tailscale}
+PROVIDERS = {
+    "grafana": Grafana,
+    "hetrixtools": HetrixTools,
+    "healthchecks": Healthchecks,
+    "tailscale": Tailscale,
+}
 
 
 def run(argv=None):
@@ -43,7 +49,7 @@ def run(argv=None):
 
     progress(f"Reading remote resources from {args.provider}...")
     remote = APIAdapter(
-        provider=PROVIDERS[args.provider](), owner=owner,
+        provider=PROVIDERS[args.provider](**config.get("settings", {})), owner=owner,
         declarations=None if args.list else declarations, adoptions=adoptions,
     )
 
