@@ -10,12 +10,12 @@ the plan. There is no persistent state file or background reconciliation.
 Run configured apps from the consuming flake (this repository's root):
 
 ```sh
-nix run .#hetrixtools
-nix run .#healthchecks
-nix run .#tailscale-svc
-nix run .#tailscale-svc -- --doit
-nix run .#grafana
-nix run .#grafana -- --doit
+nix run .#sync-hetrixtools
+nix run .#sync-healthchecks
+nix run .#sync-tailscale-svc
+nix run .#sync-tailscale-svc -- --doit
+nix run .#sync-grafana
+nix run .#sync-grafana -- --doit
 ```
 
 All apps accept:
@@ -84,7 +84,7 @@ Each provider takes an `owner` namespace, a `sopsSecretsFile`, and declarations:
 resource. Use `lib.mkDefault` for overridable defaults; normal module merging,
 list concatenation, and priorities apply. See [flake-module.nix](flake-module.nix)
 for all fields and defaults. Provider field rules are left to the APIs.
-The Tailscale configuration is optional (`null` disables `tailscale-svc`).
+The Tailscale configuration is optional (`null` disables `sync-tailscale-svc`).
 
 ## Ownership and adoption
 
@@ -111,9 +111,9 @@ name. The resource must match and be unowned or belong to the same owner.
 HetrixTools also requires the same ownership key:
 
 ```sh
-nix run .#hetrixtools -- --list
-nix run .#hetrixtools -- --adopt web=MONITOR_ID
-nix run .#hetrixtools -- --adopt web=MONITOR_ID --doit
+nix run .#sync-hetrixtools -- --list
+nix run .#sync-hetrixtools -- --adopt web=MONITOR_ID
+nix run .#sync-hetrixtools -- --adopt web=MONITOR_ID --doit
 ```
 
 This still reconciles every declaration and removal. Explicit adoption can
@@ -230,8 +230,8 @@ and [AlertRule API](https://grafana.com/whats-new/2026-10-22-new-alertrule-and-r
 ### Grafana notification inhibition
 
 `grafana.inhibitionRules` declares native `InhibitionRule` resources for Grafana's
-built-in Alertmanager. `nix run .#grafana` previews both folders/alert rules and
-inhibition rules; `nix run .#grafana -- --doit` applies both plans. Discovery and
+built-in Alertmanager. `nix run .#sync-grafana` previews both folders/alert rules and
+inhibition rules; `nix run .#sync-grafana -- --doit` applies both plans. Discovery and
 declaration validation for both resource sets finish before any writes, so an
 inhibition API or permission error during discovery prevents folder changes too.
 `--adopt KEY=FOLDER_UID` still selects folders within the complete plan.
@@ -405,5 +405,5 @@ python -m remote_sync.cli tailscale --help
 
 The standalone CLI takes a provider name and `--config-file`; configured apps
 supply both and load SOPS credentials. Its provider name is `tailscale`, while
-the configured app is `tailscale-svc`. Builds and flake checks run Python tests
+the configured app is `sync-tailscale-svc`. Builds and flake checks run Python tests
 with fake APIs and real DiffSync; they do not test live API access or alert delivery.

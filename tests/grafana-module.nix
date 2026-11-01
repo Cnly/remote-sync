@@ -86,6 +86,6 @@ assert builtins.all (matcher: matcher.type == "=") cfg.grafana.inhibitionRules.u
 # Building the real launcher also checks that deferred ruleDefaults modules
 # are excluded from the generated JSON. Do not run SOPS or contact Grafana.
 pkgs.runCommand "grafana-module-check" {} ''
-  test -x ${appCfg.apps.grafana.program}
+  test -x ${appCfg.apps.sync-grafana.program}
   touch "$out"
 ''

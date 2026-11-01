@@ -322,7 +322,7 @@ in {
   options = {
     grafana = mkOption {
       default = null;
-      description = "Grafana alert-folder and notification-inhibition reconciliation; configure this to expose the grafana app.";
+      description = "Grafana alert-folder and notification-inhibition reconciliation; configure this to expose the sync-grafana app.";
       type = nullOr (submodule ({ config, ... }: {
         options = {
           owner = mkOption {
@@ -355,7 +355,7 @@ in {
           inhibitionRules = mkOption {
             type = attrsOf (submodule [ inhibitionRuleModule config.inhibitionRuleDefaults ]);
             default = {};
-            description = "Notification inhibition rules managed alongside alert folders by the grafana app. Keys determine immutable names nix-sync-<owner>--<key>, which must be lowercase DNS names of at most 40 characters. Removing a declaration deletes its owned rule; unowned and externally provisioned rules are preserved.";
+            description = "Notification inhibition rules managed alongside alert folders by the sync-grafana app. Keys determine immutable names nix-sync-<owner>--<key>, which must be lowercase DNS names of at most 40 characters. Removing a declaration deletes its owned rule; unowned and externally provisioned rules are preserved.";
           };
           inhibitionRuleDefaults = mkOption {
             type = deferredModule;
@@ -393,7 +393,7 @@ in {
     };
     healthchecks = mkOption {
       default = null;
-      description = "Healthchecks.io reconciliation; configure this to expose the healthchecks app.";
+      description = "Healthchecks.io reconciliation; configure this to expose the sync-healthchecks app.";
       type = nullOr (submodule ({ config, ... }: {
         options = {
           owner = mkOption {
@@ -464,7 +464,7 @@ in {
     }: {
       type = "app";
       program = lib.getExe (pkgs.writeShellApplication {
-        name = "remote-sync-${provider}";
+        name = "sync-${provider}";
         derivationArgs = localDrvArgs;
         runtimeInputs = [ pkgs.sops pkgs.bash ];
         runtimeEnv = {
@@ -481,7 +481,7 @@ in {
 
   in {
 
-    apps.grafana = lib.mkIf (grafanaCfg != null) (mkLauncherApp {
+    apps.sync-grafana = lib.mkIf (grafanaCfg != null) (mkLauncherApp {
       provider = "grafana";
       inherit (grafanaCfg) owner;
       settings = { inherit (grafanaCfg) url namespace; };
@@ -495,21 +495,21 @@ in {
       sopsFile = grafanaCfg.sopsSecretsFile;
     });
 
-    apps.tailscale-svc = lib.mkIf (tailscaleCfg != null) (mkLauncherApp {
+    apps.sync-tailscale-svc = lib.mkIf (tailscaleCfg != null) (mkLauncherApp {
       provider = "tailscale";
       inherit (tailscaleCfg) owner;
       resources = tailscaleCfg.services;
       sopsFile = tailscaleCfg.sopsSecretsFile;
     });
 
-    apps.hetrixtools = mkLauncherApp {
+    apps.sync-hetrixtools = mkLauncherApp {
       provider = "hetrixtools";
       inherit (hetrixCfg) owner;
       resources = hetrixCfg.httpMonitors;
       sopsFile = hetrixCfg.sopsSecretsFile;
     };
 
-    apps.healthchecks = mkLauncherApp {
+    apps.sync-healthchecks = mkLauncherApp {
       provider = "healthchecks";
       inherit (healthchecksCfg) owner;
       resources = healthchecksCfg.checks;
