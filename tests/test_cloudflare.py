@@ -85,6 +85,19 @@ def sync(api, phases, *, adoptions=None, **flags):
     reconcile(collections, owner="site", **flags)
 
 
+def test_token_is_required_at_startup(monkeypatch):
+    monkeypatch.delenv("CLOUDFLARE_API_TOKEN", raising=False)
+    with pytest.raises(AssertionError, match="Set CLOUDFLARE_API_TOKEN"):
+        Cloudflare()
+
+
+def test_config_requires_a_zone_or_worker():
+    api = CloudflareAPI()
+    with pytest.raises(ValueError, match="Declare at least one Cloudflare zone or Worker"):
+        Cloudflare(api=api).collections(owner=None, declarations={}, adoptions={})
+    assert not api.calls
+
+
 def test_one_phase_diff_and_write_for_edits_removals_reordering_and_adoption(capsys):
     manual = entry("dashboard", owner=None, description="Manual rule", logging={"enabled": True})
     foreign = entry("other", owner="elsewhere")

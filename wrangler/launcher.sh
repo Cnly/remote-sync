@@ -18,6 +18,7 @@ if [[ -n ${WORKER_CONFIG:-} ]]; then
     fi
     source="$PWD/$WORKER_RELATIVE_SOURCE"
     workspace="$project/dev"
+    WORKER_CONFIG=$WORKER_DEV_CONFIG
   fi
 
   # Separate configs/source links let deployment coexist with a running dev

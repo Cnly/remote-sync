@@ -1,13 +1,13 @@
-"""Zone rules managed through Cloudflare's v4 Rulesets API."""
+"""Cloudflare zone rules and Worker routing."""
 
-import os
 from functools import cached_property
 from urllib.parse import quote
 
 from .. import Collection, Provider
-from ...http import API, APIStatusError
 from ...resources import RemoteResource
 from ...utils import progress
+from .client import CloudflareClient
+from .workers import WorkerAccounts, WorkerCollection, WorkerRouting
 
 
 PHASES = {
@@ -117,38 +117,16 @@ class Ruleset(RemoteResource):
         return merged
 
 
-class Cloudflare:
-    def __init__(self, *, api=None):
-        self.api = api or API("https://api.cloudflare.com/client/v4", os.environ["CLOUDFLARE_API_TOKEN"])
-
-    def request(self, method, path, *, missing_entrypoint=False, **kwargs):
-        try:
-            response = self.api.request(method, path, **kwargs)
-        except APIStatusError as exc:
-            try:
-                errors = exc.response.json()["errors"]
-            except (ValueError, KeyError, TypeError):
-                raise RuntimeError(f"Cloudflare {method} {path}: {exc}") from None
-            if (missing_entrypoint and exc.response.status_code == 404 and
-                    [error.get("code") for error in errors] == [10003]):
-                return None
-            detail = ", ".join(f"{error.get('code')}: {error.get('message')}" for error in errors)
-            raise RuntimeError(f"Cloudflare {method} {path}: {exc} {detail}") from None
-        assert response.get("success") is True, f"Cloudflare {method} {path} failed: {response.get('errors')}"
-        return response
-
-    def zone_id(self, name):
-        page = self.request("GET", "/zones", params={"name": name, "per_page": 50})
-        zones = page["result"]
-        info = page.get("result_info", {})
-        assert (len(zones) == 1 and zones[0]["name"].lower() == name and
-                info.get("total_count", 1) == 1 and info.get("total_pages", 1) == 1), (
-            f"Expected one visible Cloudflare zone named {name}; check the name and token scope."
-        )
-        return zones[0]["id"]
+class Cloudflare(CloudflareClient):
+    def __init__(self, *, api=None, workers=None):
+        super().__init__(api=api)
+        self.workers = workers or {}
 
     def collections(self, *, owner, declarations, adoptions):
-        assert owner and "--" not in owner, "Cloudflare owner must be nonempty and cannot contain '--'."
+        if not declarations and not self.workers:
+            raise ValueError("Declare at least one Cloudflare zone or Worker to run sync-cloudflare.")
+        if declarations:
+            assert owner and "--" not in owner, "Cloudflare owner must be nonempty and cannot contain '--'."
         collections = {}
         for zone, config in declarations.items():
             assert zone and zone == zone.lower().rstrip(".") and "/" not in zone, (
@@ -174,6 +152,9 @@ class Cloudflare:
             targets = collection.provider.adoptions.setdefault(phase, {})
             assert rule_id not in targets, "Cannot adopt one rule ID under multiple keys."
             targets[rule_id] = RemoteResource.format_ownership_marker(owner, key)
+        accounts = WorkerAccounts(self)
+        for key, worker in self.workers.items():
+            collections[f"workers/{key}"] = WorkerCollection(WorkerRouting(accounts, key, worker, owner))
         return collections
 
 

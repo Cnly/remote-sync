@@ -1,10 +1,11 @@
 # Remote sync
 
-Declarative reconciliation for Cloudflare zone rules, Grafana alert folders and inhibition rules,
+Declarative reconciliation for Cloudflare zone rules and Worker routing, Grafana alert folders and inhibition rules,
 HetrixTools HTTP monitors, Healthchecks.io checks, and Tailscale Services. Each run reads the API, uses
 DiffSync to compare it with configuration, and previews changes. `--doit` applies
 the plan. There is no persistent state file or background reconciliation.
 The flake module also provides Wrangler apps for Cloudflare Workers.
+For token setup, see [Cloudflare API token permissions](#cloudflare-api-token-permissions).
 
 ## Usage
 
@@ -26,7 +27,7 @@ The reconciliation apps accept the following options.
 | --- | --- |
 | `--doit` | Discover, preview, and apply the full plan, including removals. |
 | `-v`, `--verbose` | Show detailed API reads and ownership operations. |
-| `-l`, `--list` | Print inventory keyed by remote ID. Cloudflare groups rulesets by zone, and Grafana groups resources under `folders` and `inhibitionRules`. |
+| `-l`, `--list` | Print inventory keyed by remote ID. Cloudflare groups rulesets by zone and routing by Worker. Grafana groups resources under `folders` and `inhibitionRules`. |
 | `--adopt KEY=ID` | Select an existing resource within the full plan; repeatable. Grafana adoption targets folders. |
 | `--help` | Show help without decrypting credentials. |
 
@@ -54,7 +55,7 @@ inputs.remote-sync.inputs.nixpkgs.follows = "nixpkgs";
 ```
 
 Import `inputs.remote-sync.flakeModules.default` in your flake-parts modules.
-Each reconciliation provider takes an `owner` namespace, a `sopsSecretsFile`, and declarations.
+Providers take a `sopsSecretsFile` and declarations. Providers that store ownership markers also take an `owner` namespace.
 
 ```nix
 { lib, ... }: {
@@ -99,6 +100,7 @@ by their declaration key.
 | Provider | Marker storage | Automatic adoption matches | Declaration removed |
 | --- | --- | --- | --- |
 | Cloudflare rules | Rule `ref` | Explicit rule ID within zone and phase | Delete owned rule in configured phase |
+| Cloudflare Worker routes and Custom Domains | Target Worker in its account | Existing bindings to the declared Worker | Delete the binding from the declared Worker |
 | HetrixTools | Standalone private-note line | Exact target URL and HTTP method | Delete owned monitor |
 | Healthchecks | Tag | Exact slug | Pause owned check |
 | Tailscale | Standalone comment line | Exact service name (`svc:…`) | Delete owned service |
@@ -145,12 +147,63 @@ This repository's [deployment module](../deployments/remote-sync/default.nix)
 supplies shared defaults and collects host configuration. Collected fields use
 `mkDefault`, so explicit declarations can override them.
 
+### Cloudflare API token permissions
+
+Set `CLOUDFLARE_API_TOKEN` in `cloudflare.sopsSecretsFile`. In the Cloudflare
+dashboard, select the permissions for the operations you use. For a token used
+only for previews or `--list`, select **Read** for each applicable permission.
+**Edit** includes read access. [Cloudflare permission reference](https://developers.cloudflare.com/fundamentals/api/reference/permissions/)
+
+| Dashboard permission                  | Operation                                                                    |
+| ------------------------------------- | ---------------------------------------------------------------------------- |
+| Zone → Zone → Read                    | Look up zones for rules, Worker routes, or Custom Domains                    |
+| Account → Workers Scripts → Read      | Read a declared Worker's live routes and Custom Domains                      |
+| Account → Workers Scripts → Edit      | Deploy Worker code with Wrangler or attach, update, or remove Custom Domains |
+| Zone → Workers Routes → Edit          | Create or remove ordinary Worker routes (`zoneRoutes`)                       |
+| Zone → Single Redirect → Edit         | Manage Single Redirects (`http_request_dynamic_redirect`)                    |
+| Zone → Cache Rules → Edit             | Manage Cache Rules (`http_request_cache_settings`)                           |
+| Account → Account Rulesets → Edit     | Additional grant in Cloudflare's [Cache Rules API guide]                     |
+| Account → Account Filter Lists → Edit | Additional grant in Cloudflare's [Cache Rules API guide]                     |
+| Zone → Zone WAF → Edit                | Manage custom WAF rules (`http_request_firewall_custom`)                     |
+| Zone → Zone WAF → Edit                | Manage rate limiting (`http_ratelimit`)                                      |
+| Zone → Transform Rules → Edit         | Rewrite URLs (`http_request_transform`)                                      |
+| Zone → Transform Rules → Edit         | Transform request headers (`http_request_late_transform`)                    |
+| Zone → Transform Rules → Edit         | Transform response headers (`http_response_headers_transform`)               |
+| Account → Account Rulesets → Read     | Read rulesets for URL and header transforms ([zone transform examples])      |
+| Zone → Origin Rules → Edit            | Manage Origin Rules (`http_request_origin`)                                  |
+| Zone → Config Rules → Edit            | Manage Configuration Rules (`http_config_settings`)                          |
+
+[Cache Rules API guide]: https://developers.cloudflare.com/cache/how-to/cache-rules/create-api/#required-api-token-permissions
+[zone transform examples]: https://developers.cloudflare.com/terraform/additional-configurations/transform-rules/
+
+The zone Rulesets API used by `sync-cloudflare` lists **Cache Settings Write**
+and **Zone Transform Rules Write** among its accepted grants. Cloudflare's URL
+Rewrite API guide specifies **Account → Transform Rules → Edit** for URL rewrites.
+[URL Rewrite API permissions](https://developers.cloudflare.com/rules/transform/url-rewrite/create-api/#required-api-token-permissions) · [Zone ruleset writes](https://developers.cloudflare.com/ruleset-engine/rulesets-api/update/)
+
+Grant each zone-level rule permission on the zones where you declare that phase. For Worker
+routing, grant **Zone → Zone → Read** on zones containing a declared or live
+binding. Previewing an ordinary route also needs **Zone → Workers Routes → Read**
+in its zone. Removing a stale route needs **Workers Routes → Edit** there, even
+if the zone is absent from Nix. [Worker Routes API](https://developers.cloudflare.com/api/resources/workers/subresources/routes/) · [Custom Domains API](https://developers.cloudflare.com/api/resources/workers/subresources/domains/)
+
+To **discover the account ID** automatically, scope the token to one Workers
+account. If listing accounts returns HTTP 403 or an empty list, `sync-cloudflare`
+can infer the account from visible zones. Wrangler needs a successful
+`GET /accounts` when it has no configured or cached ID. Cloudflare's Workers token template includes
+**Account → Account Settings → Read** for account access. [Token templates](https://developers.cloudflare.com/fundamentals/api/reference/template/) · [Wrangler account lookup](https://github.com/cloudflare/workers-sdk/blob/wrangler%404.156.0/packages/workers-auth/src/core/factory.ts#L413-L432)
+
 ### Cloudflare Rules
 
-Declaring a zone under `cloudflare.zones` enables `sync-cloudflare`. The app
-manages zone entry points through the Rulesets API. Use the zone's DNS name
-and the Cloudflare phase name. The app resolves the zone ID once per run and
-requires one exact match visible to the token.
+`cloudflare` defaults to `{}`. Importing the flake module exposes
+`sync-cloudflare` and `wrangler`. Both require `cloudflare.sopsSecretsFile`
+when Nix evaluates their programs, including during `nix flake check`.
+Declare at least one zone or Worker before running `sync-cloudflare`.
+
+Declare zones under `cloudflare.zones` to manage their entry points through
+the Rulesets API. Use the zone's DNS name and the Cloudflare phase name.
+The app resolves the zone ID once per run and requires one exact match
+visible to the token.
 
 ```nix
 cloudflare = {
@@ -164,10 +217,11 @@ cloudflare = {
 };
 ```
 
-Supported phases cover Single Redirects, Cache Rules, URL rewrites, request
-and response header transforms, Origin Rules, Configuration Rules, custom WAF
-rules, and rate limiting. Use the API's native `action_parameters`, `ratelimit`,
-and `logging` objects where applicable. [Cloudflare phase reference](https://developers.cloudflare.com/ruleset-engine/reference/phases-list/)
+`sync-cloudflare` accepts the nine zone-level phases in the
+[permissions table](#cloudflare-api-token-permissions). It rejects other phase
+names before discovery. Within those phases, use the API's action names and
+native `action_parameters`, `ratelimit`, `logging`, and `exposed_credential_check`
+objects where applicable. [Cloudflare phase reference](https://developers.cloudflare.com/ruleset-engine/reference/phases-list/)
 
 Rules run in ascending `order` within their phase. The default is `100`, and
 ties are allowed. The Nix module breaks ties by declaration key. It emits an
@@ -197,10 +251,12 @@ run. [Cloudflare ruleset updates](https://developers.cloudflare.com/ruleset-engi
 
 ### Cloudflare Workers
 
-Declare Workers under `cloudflare.workers`. Each declaration generates a
-`sync-worker-<name>` app and defaults the Wrangler script name to the declaration
-key. Put Wrangler fields such as `routes` and `vars` in `settings`.
-`cloudflare.workerDefaults` is a module applied to every Worker.
+`cloudflare.workers.<name>` generates a `sync-worker-<name>` Wrangler app and
+gives `sync-cloudflare` ownership of that Worker's ordinary routes and Custom
+Domains. The declaration key defaults the Wrangler script
+name. Use `settings.name` to target a different script. Put other Wrangler
+fields such as `vars` in `settings`. The `cloudflare.workerDefaults` module
+applies to every Worker.
 
 ```nix
 cloudflare = {
@@ -209,25 +265,54 @@ cloudflare = {
   workers.site = {
     source = ./workers/site;
     settings.compatibility_date = "2026-09-10";
+    customDomains."app.example.com" = {};
+    zoneRoutes."example.net" = [ "example.net/files/*" ];
   };
 };
 ```
 
-Wrangler uses the consuming flake's `pkgs.wrangler` and reads
-`CLOUDFLARE_API_TOKEN` from the same `cloudflare.sopsSecretsFile` as the rules
-app. A Workers-only configuration can omit `cloudflare.owner`.
+Both routing options default to `{}`. Leaving either empty removes the
+declared Worker's live bindings of that kind on apply, including
+bindings in zones absent from `cloudflare.zones`. Other Workers and scriptless
+bypass routes keep their bindings. To retire a Worker's routing, apply with both
+maps empty before removing its declaration. For a Custom Domain, `enabled`
+defaults to true and `previews_enabled` defaults to false. Set `zone_name` or
+`zone_id` to select its zone explicitly.
+
+When multiple accounts are visible, set the Worker's `settings.account_id` or
+set `CLOUDFLARE_ACCOUNT_ID` for a shared account. The per-Worker setting takes
+precedence. A Workers-only configuration can omit `cloudflare.owner`.
+[Cloudflare API token permissions](#cloudflare-api-token-permissions)
+
+The provider reads the service's default environment, then lists that Worker's
+ordinary routes and Custom Domains. Failure to read either inventory stops
+the run before any writes. Zone route checks cover the zones in the Worker's
+live route list and its `zoneRoutes` declaration. For a new Custom Domain,
+an explicit zone ID selects that zone directly. Otherwise the provider uses
+the declared zone name or searches the hostname and its parents for a match.
+If discovery cannot verify a managed binding or its zone, it fails before
+any writes. A denied ownership check or write during apply stops the run
+with an error. Earlier successful writes remain in effect. [Wrangler's route lookup](https://github.com/cloudflare/workers-sdk/blob/wrangler@4.156.0/packages/deploy-helpers/src/deploy/helpers/download-worker-config.ts) · [Zone Details API](https://developers.cloudflare.com/api/resources/zones/methods/get/) · [Zone Routes API](https://developers.cloudflare.com/api/resources/workers/subresources/routes/) · [Custom Domains API](https://developers.cloudflare.com/api/resources/workers/subresources/domains/)
+
+Deploy a new script before applying its routing. Run the routing app to preview
+and remove stale routes even when the Worker code already has its latest deployment.
 
 ```sh
 nix run .#wrangler -- whoami
 nix run .#sync-worker-site -- dev
 nix run .#sync-worker-site -- deploy
+nix run .#sync-cloudflare
+nix run .#sync-cloudflare -- --doit
 ```
 
-The `wrangler` app passes arguments straight to Wrangler. The per-Worker apps
-also pass the generated `wrangler.json`. Run `dev` from the consuming flake root
+The standalone `wrangler` app works with just `cloudflare.sopsSecretsFile`
+and passes arguments straight to Wrangler. The per-Worker apps also pass
+the generated `wrangler.json`. Run `dev` from the consuming flake root
 with a source directory inside that flake to pick up working-tree edits.
-`deploy` uses the Nix store snapshot. Both commands share Wrangler's local
-state under `.wrangler/<name>/runtime`.
+`dev` receives the routing declarations for local host inference. `deploy`
+uses the Nix store snapshot and leaves publishing routes and domains to
+`sync-cloudflare`. Both commands share Wrangler's local state under
+`.wrangler/<name>/runtime`.
 
 ### HetrixTools
 
@@ -429,10 +514,9 @@ TAILSCALE_OAUTH_CLIENT_SECRET: "your-client-secret"
 GRAFANA_SERVICE_ACCOUNT_TOKEN: "your-service-account-token"
 ```
 
-- **Cloudflare zone rules** need Zone Read for name lookup and the product permissions
-  for each configured phase. For example, grant Dynamic URL Redirects and
-  Cache Settings read for discovery or write for apply. The provider reads
-  `CLOUDFLARE_API_TOKEN` at runtime.
+- **Cloudflare** and Wrangler share `CLOUDFLARE_API_TOKEN`. If you also use
+  octoDNS, grant DNS record access to the token configured in its Cloudflare
+  provider. [Cloudflare API token permissions](#cloudflare-api-token-permissions)
 - **HetrixTools:** v3 GET monitors, GET private notes, and POST private notes;
   v2 add/edit/delete monitor permissions. `contact_list_id = null` uses the file's
   contact list ID; `""` disables notifications. `--list` needs only the API token.
@@ -453,8 +537,8 @@ environment, with SOPS values overriding matching variables.
 
 ## Execution and development
 
-Discovery happens once per invocation; apply uses that snapshot without
-rereading resources. Use one writer per account during a run. There is no
+Discovery happens once per invocation. Worker routing also rechecks binding
+ownership before updating or deleting it. Use one writer per account during a run. There is no
 transaction or rollback: earlier successful writes remain after a later failure.
 Preview again after failures; newly created HetrixTools monitors can be adopted
 if ownership tagging failed, and Tailscale can retry unfinished host approvals.

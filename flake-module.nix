@@ -4,7 +4,8 @@
   inherit (lib.types) anything attrsOf bool deferredModule int listOf nullOr path str submodule;
 
   cloudflareCfg = config.cloudflare;
-  hasCloudflareZones = cloudflareCfg != null && cloudflareCfg.zones != {};
+  hasCloudflareZones = cloudflareCfg.zones != {};
+  hasCloudflareWorkers = cloudflareCfg.workers != {};
   grafanaCfg = config.grafana;
   hetrixCfg = config.hetrixtools;
   healthchecksCfg = config.healthchecks;
@@ -345,12 +346,18 @@ in {
 
   options = {
     cloudflare = mkOption {
-      default = null;
-      description = "Cloudflare zone rules and Wrangler-managed Workers.";
-      type = nullOr (submodule {
+      default = {};
+      description = "Cloudflare zone rules, Worker routing, and Wrangler deployment settings.";
+      type = submodule {
         options = {
-          owner = mkOption { type = str; description = "Namespace for nix-sync-<owner>--<key> rule refs. Required when configuring zones."; };
-          sopsSecretsFile = mkOption { type = path; description = "Encrypted YAML supplying CLOUDFLARE_API_TOKEN to the rules and Wrangler apps."; };
+          owner = mkOption {
+            type = str;
+            description = "Namespace for nix-sync-<owner>--<key> rule refs. Required when configuring zones.";
+          };
+          sopsSecretsFile = mkOption {
+            type = path;
+            description = "SOPS-encrypted YAML file supplying CLOUDFLARE_API_TOKEN to sync-cloudflare and Wrangler.";
+          };
           zones = mkOption {
             default = {};
             description = "Cloudflare zones keyed by DNS name.";
@@ -363,7 +370,7 @@ in {
             });
           };
         };
-      });
+      };
     };
     grafana = mkOption {
       default = null;
@@ -526,12 +533,19 @@ in {
 
   in {
 
-    apps.${if hasCloudflareZones then "sync-cloudflare" else null} = mkLauncherApp {
+    apps.sync-cloudflare = mkLauncherApp {
       provider = "cloudflare";
-      inherit (cloudflareCfg) owner;
+      owner = if hasCloudflareZones then cloudflareCfg.owner else null;
       resources = lib.mapAttrs (_: zone: {
         phases = lib.mapAttrs (_: rules: { rules = orderedCloudflareRules rules; }) zone.rules;
       }) cloudflareCfg.zones;
+      settings = lib.optionalAttrs hasCloudflareWorkers {
+        workers = lib.mapAttrs (_: worker: {
+          inherit (worker) customDomains zoneRoutes;
+          inherit (worker.settings) name;
+          account_id = worker.settings.account_id or null;
+        }) cloudflareCfg.workers;
+      };
       sopsFile = "${cloudflareCfg.sopsSecretsFile}";
     };
 
