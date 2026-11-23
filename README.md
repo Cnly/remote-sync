@@ -1,156 +1,48 @@
 # Remote sync
 
-Declarative reconciliation for Cloudflare zone rules and Worker routing, Grafana alert folders and inhibition rules,
-HetrixTools HTTP monitors, Healthchecks.io checks, and Tailscale Services. Each run reads the API, uses
-DiffSync to compare it with configuration, and previews changes. `--doit` applies
-the plan. There is no persistent state file or background reconciliation.
-The flake module also provides Wrangler apps for Cloudflare Workers.
-For token setup, see [Cloudflare API token permissions](#cloudflare-api-token-permissions).
-
-## Usage
-
-Run the configured reconciliation apps from the consuming flake.
-
-```sh
-nix run .#sync-cloudflare
-nix run .#sync-hetrixtools
-nix run .#sync-healthchecks
-nix run .#sync-tailscale-svc
-nix run .#sync-tailscale-svc -- --doit
-nix run .#sync-grafana
-nix run .#sync-grafana -- --doit
-```
-
-The reconciliation apps accept the following options.
-
-| Option | Behavior |
-| --- | --- |
-| `--doit` | Discover, preview, and apply the full plan, including removals. |
-| `-v`, `--verbose` | Show detailed API reads and ownership operations. |
-| `-l`, `--list` | Print inventory keyed by remote ID. Cloudflare groups rulesets by zone and routing by Worker. Grafana groups resources under `folders` and `inhibitionRules`. |
-| `--adopt KEY=ID` | Select an existing resource within the full plan; repeatable. Grafana adoption targets folders. |
-| `--help` | Show help without decrypting credentials. |
-
-Plans and inventory go to stdout; progress, retries, and errors go to stderr.
-`--list` skips ownership resolution, HetrixTools private notes, and Tailscale host
-approvals. It cannot be combined with `--doit` or `--adopt`.
-
-Each collection keeps its detailed diff and resource-name summary. Previews with
-multiple collections end with an overview of each collection's operation counts,
-including zero-change collections. Several rule edits in one Cloudflare phase
-count as one phase change. Several alert edits in one Grafana folder count as
-one folder change.
+Remote sync compares Nix declarations with live resources in Cloudflare, Grafana,
+HetrixTools, Healthchecks.io, and Tailscale. Each run previews changes without a
+state file or daemon. The flake also provides Wrangler apps for Cloudflare Workers.
 
 ## Flake configuration
 
-The standalone flake exports `packages.remote-sync`, `packages.default`,
-`devShells.default`, and `flakeModules.default`. It uses `systems`, `flake-parts`,
-and `nixpkgs` unstable; the consuming flake can override those inputs:
+The flake exports `flakeModules.default`, `packages.remote-sync`, `packages.default`,
+and `devShells.default`. Existing flakes can share their `nixpkgs`, `flake-parts`,
+and `systems` inputs with `remote-sync` using `follows`.
 
-```nix
-inputs.remote-sync.url = "path:./remote-sync";
-inputs.remote-sync.inputs.systems.follows = "systems";
-inputs.remote-sync.inputs.flake-parts.follows = "flake-parts";
-inputs.remote-sync.inputs.nixpkgs.follows = "nixpkgs";
+Running an app evaluates its launcher. A whole-flake `nix flake check` evaluates
+all exported launchers and requires settings for the other providers as well.
+
+Providers take a `sopsSecretsFile` and declarations. `httpDefaults`,
+`checkDefaults`, and `serviceDefaults` apply a module to each resource. Use
+`lib.mkDefault` for defaults that individual declarations can override.
+`tailscale = null` disables `sync-tailscale-svc`. See [flake-module.nix](flake-module.nix)
+for the option definitions.
+
+## Credentials
+
+Configured apps load credentials at runtime with `sops exec-env`. In the consuming
+flake, run `sops edit ./secrets.yaml` on the file you set as `sopsSecretsFile`.
+Include the variables your providers use.
+
+```yaml
+CLOUDFLARE_API_TOKEN: "your-cloudflare-api-token"
+HETRIXTOOLS_API_TOKEN: "your-api-token"
+HETRIXTOOLS_CONTACT_LIST_ID: "your-contact-list-id"
+HEALTHCHECKS_API_KEY: "your-management-api-key"
+TAILSCALE_OAUTH_CLIENT_SECRET: "your-client-secret"
+GRAFANA_SERVICE_ACCOUNT_TOKEN: "your-service-account-token"
 ```
 
-Import `inputs.remote-sync.flakeModules.default` in your flake-parts modules.
-Providers take a `sopsSecretsFile` and declarations. Providers that store ownership markers also take an `owner` namespace.
-
-```nix
-{ lib, ... }: {
-  hetrixtools = {
-    owner = "flake";
-    sopsSecretsFile = ./secrets.yaml;
-    httpDefaults.locations = lib.mkDefault [ "new_york" "singapore" ];
-    httpMonitors.web = {
-      name = "Website";
-      target = "https://example.com/health";
-    };
-  };
-  healthchecks = {
-    owner = "flake";
-    sopsSecretsFile = ./secrets.yaml;
-    checks.server.timeout = 120;
-  };
-  tailscale = {
-    owner = "flake";
-    sopsSecretsFile = ./secrets.yaml;
-    services.web = {
-      ports = [ "tcp:443" ];
-      devices = [ "server" ];
-    };
-  };
-}
-```
-
-`httpDefaults`, `checkDefaults`, and `serviceDefaults` are modules applied to each
-resource. Use `lib.mkDefault` for overridable defaults; normal module merging,
-list concatenation, and priorities apply. See [flake-module.nix](flake-module.nix)
-for all fields and defaults. Provider field rules are left to the APIs.
-The Tailscale configuration is optional (`null` disables `sync-tailscale-svc`).
-
-## Ownership and adoption
-
-Healthchecks and Tailscale use `nix-sync-<owner>`, such as `nix-sync-flake`.
-Checks are identified by slug and services by API name; plans use those identities
-as labels. HetrixTools keeps `nix-sync-<owner>--<key>` and identifies owned monitors
-by their declaration key.
-
-| Provider | Marker storage | Automatic adoption matches | Declaration removed |
-| --- | --- | --- | --- |
-| Cloudflare rules | Rule `ref` | Explicit rule ID within zone and phase | Delete owned rule in configured phase |
-| Cloudflare Worker routes and Custom Domains | Target Worker in its account | Existing bindings to the declared Worker | Delete the binding from the declared Worker |
-| HetrixTools | Standalone private-note line | Exact target URL and HTTP method | Delete owned monitor |
-| Healthchecks | Tag | Exact slug | Pause owned check |
-| Tailscale | Standalone comment line | Exact service name (`svc:…`) | Delete owned service |
-| Grafana folders | Folder `remote-sync/owner` annotation | Exact UID of a folder with no alerts | Clear alerts; retain folder and dashboards |
-| Grafana inhibition rules | Immutable `nix-sync-<owner>--<key>` name | Adoption unsupported | Delete owned rule |
-
-Adoption attaches ownership and reconciles settings in the same apply, preserving
-other notes, comments, or tags used alongside the marker. Unrelated unowned
-resources and other owners' resources are left alone. Conflicting ownership and
-ambiguous matches abort before writes.
-
-`--adopt KEY=ID` uses the declaration key, even when plans show a slug or service
-name. The resource must match and be unowned or belong to the same owner.
-HetrixTools also requires the same ownership key:
-
-```sh
-nix run .#sync-hetrixtools -- --list
-nix run .#sync-hetrixtools -- --adopt web=MONITOR_ID
-nix run .#sync-hetrixtools -- --adopt web=MONITOR_ID --doit
-```
-
-This still reconciles every declaration and removal. Explicit adoption can
-disambiguate HetrixTools monitors; Healthchecks still requires unique slugs.
-
-Healthchecks and Tailscale declaration keys can change while the effective slug
-or service name stays the same. Changing a slug/service name declares a different
-identity: the old check is paused or the old service deleted. To retain the
-resource through a rename, rename it remotely and change the declaration before
-the next sync. Defaults derive identities from keys, so set them explicitly when
-renaming only a key.
-
-Existing keyed Healthchecks/Tailscale markers for this owner are shortened on
-apply as an Update, preserving other tags/comment text, check history, and service
-addresses. Matching already uses the slug/service name during this migration.
-
-Keep HetrixTools keys stable; renaming one requires editing its existing marker
-or removing the marker and adopting under the new key.
-Changing `owner` alone does not transfer resources. To stop managing a resource
-without deleting it, remove both its declaration and marker before applying.
-
-## Provider behavior
-
-This repository's [deployment module](../deployments/remote-sync/default.nix)
-supplies shared defaults and collects host configuration. Collected fields use
-`mkDefault`, so explicit declarations can override them.
+Jump to token permissions for [Cloudflare and Wrangler](#cloudflare-api-token-permissions),
+[HetrixTools](#hetrixtools-api-token-permissions), [Healthchecks](#healthchecks-api-key-permissions),
+[Tailscale](#tailscale-oauth-client-permissions), or [Grafana](#grafana-service-account-permissions).
 
 ### Cloudflare API token permissions
 
-Set `CLOUDFLARE_API_TOKEN` in `cloudflare.sopsSecretsFile`. In the Cloudflare
-dashboard, select the permissions for the operations you use. For a token used
+`sync-cloudflare` and Wrangler share `CLOUDFLARE_API_TOKEN` from
+`cloudflare.sopsSecretsFile`. In the Cloudflare dashboard, select the
+permissions for the operations you use. For a token used
 only for previews or `--list`, select **Read** for each applicable permission.
 **Edit** includes read access. [Cloudflare permission reference](https://developers.cloudflare.com/fundamentals/api/reference/permissions/)
 
@@ -176,22 +68,145 @@ only for previews or `--list`, select **Read** for each applicable permission.
 [Cache Rules API guide]: https://developers.cloudflare.com/cache/how-to/cache-rules/create-api/#required-api-token-permissions
 [zone transform examples]: https://developers.cloudflare.com/terraform/additional-configurations/transform-rules/
 
-The zone Rulesets API used by `sync-cloudflare` lists **Cache Settings Write**
-and **Zone Transform Rules Write** among its accepted grants. Cloudflare's URL
-Rewrite API guide specifies **Account → Transform Rules → Edit** for URL rewrites.
-[URL Rewrite API permissions](https://developers.cloudflare.com/rules/transform/url-rewrite/create-api/#required-api-token-permissions) · [Zone ruleset writes](https://developers.cloudflare.com/ruleset-engine/rulesets-api/update/)
-
-Grant each zone-level rule permission on the zones where you declare that phase. For Worker
-routing, grant **Zone → Zone → Read** on zones containing a declared or live
-binding. Previewing an ordinary route also needs **Zone → Workers Routes → Read**
-in its zone. Removing a stale route needs **Workers Routes → Edit** there, even
-if the zone is absent from Nix. [Worker Routes API](https://developers.cloudflare.com/api/resources/workers/subresources/routes/) · [Custom Domains API](https://developers.cloudflare.com/api/resources/workers/subresources/domains/)
-
 To **discover the account ID** automatically, scope the token to one Workers
 account. If listing accounts returns HTTP 403 or an empty list, `sync-cloudflare`
 can infer the account from visible zones. Wrangler needs a successful
 `GET /accounts` when it has no configured or cached ID. Cloudflare's Workers token template includes
 **Account → Account Settings → Read** for account access. [Token templates](https://developers.cloudflare.com/fundamentals/api/reference/template/) · [Wrangler account lookup](https://github.com/cloudflare/workers-sdk/blob/wrangler%404.156.0/packages/workers-auth/src/core/factory.ts#L413-L432)
+
+### HetrixTools API token permissions
+
+Set `HETRIXTOOLS_API_TOKEN` to a key with these calls enabled in **API Key Scope**.
+[HetrixTools key scopes](https://docs.hetrixtools.com/api-key-scope/) · [v3 API reference](https://docs.hetrixtools.com/api/v3/)
+
+| API call permission                           | Operation                                                           |
+| --------------------------------------------- | ------------------------------------------------------------------- |
+| `GET /v3/uptime-monitors`                     | List monitors in every mode. This is the only grant `--list` needs. |
+| `GET /v3/uptime-monitors/{id}/private-notes`  | Check ownership during preview and apply                            |
+| `POST /v3/uptime-monitors/{id}/private-notes` | Mark a new or adopted monitor as owned                              |
+| `POST /v2/{token}/uptime/add/`                | Create a monitor                                                    |
+| `POST /v2/{token}/uptime/edit/`               | Update an owned monitor                                             |
+| `POST /v2/{token}/uptime/delete/`             | Delete an owned monitor removed from Nix                            |
+
+Set `HETRIXTOOLS_CONTACT_LIST_ID` for preview and apply when a monitor uses
+`contact_list_id = null`. An explicit ID selects that list, and `""` disables notifications.
+
+### Healthchecks API key permissions
+
+Create a read-write API key in **Project Settings** and store it as `HEALTHCHECKS_API_KEY`.
+[Healthchecks Management API](https://healthchecks.io/docs/api/#authentication)
+
+### Tailscale OAuth client permissions
+
+Set `TAILSCALE_OAUTH_CLIENT_SECRET` to the OAuth client secret for the target
+tailnet. The app requests both write scopes in every mode, including `--list`,
+and renews access tokens in memory. Tailscale requires at least one tag on a
+client with `devices:core`. [Tailscale credential scopes](https://tailscale.com/docs/reference/trust-credentials#scopes)
+
+| OAuth scope (write) | Operation                                                                            |
+| ------------------- | ------------------------------------------------------------------------------------ |
+| `services`          | List, create, update, and delete Services                                            |
+| `devices:core`      | Resolve configured hosts and, together with `services`, read or grant host approvals |
+
+### Grafana service account permissions
+
+Set `GRAFANA_SERVICE_ACCOUNT_TOKEN` to a service account token from the Grafana
+instance. Every run reads folders, alert rules, and inhibition rules. Scope
+folder and alert-rule actions to the managed folders, and grant the write actions
+for the changes you apply. Alloy uses separate Cloud access-policy tokens for ingestion.
+
+| RBAC permission                               | Operation                                                               |
+| --------------------------------------------- | ----------------------------------------------------------------------- |
+| `folders:read`                                | Discover folders                                                        |
+| `alert.rules:read`                            | Discover alert rules in those folders                                   |
+| `alert.notifications.inhibition-rules:read`   | Discover inhibition rules, including when none are declared             |
+| `folders:create`                              | Create a top-level folder (scope `folders:uid:general`)                 |
+| `folders:write`                               | Update a folder title or record its ownership                           |
+| `alert.rules:create`                          | Create an alert rule                                                    |
+| `alert.rules:write`                           | Update an alert rule                                                    |
+| `alert.rules:delete`                          | Remove an alert rule from an owned folder                               |
+| `datasources:query`                           | Create a rule or change its queries against the referenced data sources |
+| `alert.notifications.receivers:read`          | Select a contact point when setting or changing `SimplifiedRouting`     |
+| `alert.notifications.inhibition-rules:write`  | Create or update an inhibition rule                                     |
+| `alert.notifications.inhibition-rules:delete` | Delete an owned inhibition rule                                         |
+
+Grafana's **Inhibition Rules Writer** role includes all three inhibition actions.
+[Folder API permissions](https://grafana.com/docs/grafana/latest/developer-resources/api-reference/http-api/folder/) ·
+[Alerting RBAC](https://grafana.com/docs/grafana/latest/alerting/set-up/configure-rbac/) ·
+[Alerting roles](https://grafana.com/docs/grafana/latest/alerting/set-up/configure-rbac/access-roles/) ·
+[Contact point authorization](https://github.com/grafana/grafana/blob/46c8a51c7fdc1fe294ff7857d377b69c948721d5/pkg/services/ngalert/accesscontrol/rules.go#L294-L330)
+
+## Usage
+
+The configured apps are `sync-cloudflare`, `sync-grafana`, `sync-healthchecks`,
+`sync-hetrixtools`, and `sync-tailscale-svc`. Each accepts the same options.
+
+| Option | Behavior |
+| --- | --- |
+| `--doit` | Discover, preview, and apply the full plan, including removals. |
+| `-v`, `--verbose` | Show detailed API reads and ownership operations. |
+| `-l`, `--list` | Print inventory keyed by remote ID. Cloudflare groups rulesets by zone and routing by Worker. Grafana groups resources under `folders` and `inhibitionRules`. |
+| `--adopt KEY=ID` | Select an existing resource within the full plan; repeatable. Grafana adoption targets folders. |
+| `--help` | Show help without decrypting credentials. |
+
+Plans and inventory go to stdout; progress, retries, and errors go to stderr.
+`--list` skips ownership resolution, HetrixTools private notes, and Tailscale host
+approvals. It cannot be combined with `--doit` or `--adopt`.
+
+Each collection keeps its detailed diff and resource-name summary. Previews with
+multiple collections end with an overview of each collection's operation counts,
+including zero-change collections. Several rule edits in one Cloudflare phase
+count as one phase change. Several alert edits in one Grafana folder count as
+one folder change.
+
+## Ownership and adoption
+
+Choose a stable `owner` for resources that carry an ownership marker. Adoption
+marks the matching resource and reconciles its settings on the same apply.
+
+| Resource                  | Ownership and adoption                                             | When omitted on apply                                    |
+| ------------------------- | ------------------------------------------------------------------ | -------------------------------------------------------- |
+| Cloudflare zone rule      | Owned rule `ref`, or explicit adoption by rule ID                  | Delete the owned rule in the declared zone and phase     |
+| Cloudflare Worker binding | Ordinary routes and Custom Domains attached to the declared Worker | Remove omitted bindings from that Worker                 |
+| HetrixTools monitor       | Private-note marker, adopt by exact target URL and HTTP method     | Delete the owned monitor                                 |
+| Healthchecks check        | Ownership tag, adopt by exact slug                                 | Pause the owned check                                    |
+| Tailscale Service         | Ownership comment, adopt by exact service name (`svc:…`)           | Delete the owned Service                                 |
+| Grafana folder            | Folder annotation, adopt by UID (explicitly if it contains alerts) | Clear its alert rules and keep the folder and dashboards |
+| Grafana inhibition rule   | Reserved name for this owner, explicit adoption unsupported        | Delete the owned inhibition rule                         |
+
+To retire a Cloudflare phase or a Worker's routing, apply with its rules or routing
+maps empty before dropping the phase or Worker declaration. A managed Grafana
+folder includes manually added alert rules.
+
+## Explicit adoption and renames
+
+`--adopt KEY=ID` takes a declaration key and a remote ID. The resource must match
+and be unowned or belong to the same owner. HetrixTools also checks the ownership
+key. Use `--list` to find the ID, then preview or apply the adoption.
+
+```sh
+nix run .#sync-hetrixtools -- --list
+nix run .#sync-hetrixtools -- --adopt web=MONITOR_ID
+nix run .#sync-hetrixtools -- --adopt web=MONITOR_ID --doit
+```
+
+An adoption still reconciles all declarations and removals. It preserves other
+notes, comments, or tags. Conflicting ownership and ambiguous matches stop the
+run before writes. Explicit adoption can disambiguate HetrixTools monitors.
+Healthchecks requires unique slugs.
+
+Healthchecks and Tailscale use the `nix-sync-<owner>` marker and identify resources
+by slug or service name. To rename only a declaration key, set the slug or name
+explicitly. Changing that identity pauses the old check or deletes the old Service.
+To retain the resource, rename it remotely and update the declaration before the
+next sync. Older markers that include the key are shortened on apply.
+
+HetrixTools uses `nix-sync-<owner>--<key>`. Renaming a key requires editing the
+existing marker or removing it and adopting the monitor under the new key. For
+marker-based providers, changing `owner` alone does not transfer ownership. To
+release a marked resource, remove its declaration and its marker before applying.
+
+## Provider behavior
 
 ### Cloudflare Rules
 
@@ -322,10 +337,8 @@ its ID.
 Automatic adoption ignores the display name; URLs must match exactly, including
 case and trailing slashes. Ownership stays in private notes.
 
-Locations use v3 names, translated to v2 write codes by the provider. This
-repository defaults to New York, San Francisco, Singapore, and Tokyo, alerts
-after three minutes, and enables public reports. Categories are empty unless
-declared; d0nuts declarations set `d0nuts.im`.
+Set `locations` using v3 names. The provider translates them to v2 codes for
+writes. Monitors default to an empty `category`.
 
 ### Grafana alerts
 
@@ -385,7 +398,7 @@ Optional fields such as `panelRef`, `missingSeriesEvalsToResolve`, and
 `type = "SimplifiedRouting"` with `receiver`, or `type = "NamedRoutingTree"`
 with `routingTree`. Omit them to use the default notification policy tree.
 
-Ownership is `nix-sync-<owner>` on the folder. **All AlertRule resources in an
+The folder's `remote-sync/owner` annotation stores `nix-sync-<owner>`. **All AlertRule resources in an
 owned folder are managed**, including manually added rules. Use dedicated folders:
 omitted rules are removed on apply. A matching folder with no alert rules is
 adopted automatically; adopting a folder that already contains alerts requires
@@ -448,11 +461,8 @@ Updates and deletions use resource-version preconditions and stop on conflicts.
 The inhibition API is read even when declarations are empty, so removing the last
 rule still reconciles its deletion.
 
-The service account needs `alert.notifications.inhibition-rules:read`, `:write`,
-and `:delete` permissions for these rules (or the broader notification read/write
-permissions). Folder and alert-rule permissions alone are insufficient. See
-[Grafana's inhibition documentation](https://grafana.com/docs/grafana/latest/alerting/configure-notifications/inhibition-rules/)
-for API availability and notification semantics.
+See [Grafana service account permissions](#grafana-service-account-permissions) and
+[Grafana's inhibition documentation](https://grafana.com/docs/grafana/latest/alerting/configure-notifications/inhibition-rules/).
 
 ### Healthchecks
 
@@ -460,12 +470,6 @@ for API availability and notification semantics.
 creation; existing names, UUIDs, history, and integrations are preserved. New
 checks attach all existing project integrations. The module's default `grace` is
 60 seconds.
-
-Host collection includes enabled `services.healthchecks-ping` configurations
-using `https://hc-ping.com` with `pingKey` or `pingKeyRuntimeFile` (slug-based
-pings). The host alias is the key, `pingUUIDOrSlug` is the slug, `intervalSec`
-is the timeout, and **`intervalSec + 60` is the grace period**. Ping credentials
-are not included in the generated configuration.
 
 Missing declarations pause owned checks; returning declarations resume the same
 checks. Both are Update operations through the `paused` attribute. Managed checks
@@ -481,59 +485,6 @@ skipped with a warning, so services can be created before hosts join the
 tailnet. Run sync again after they join to approve them. Ambiguous device matches
 still abort discovery. Pending approvals appear as updates; apply approves them.
 Removing a device from the list does not revoke its approval.
-
-Host collection requires both Tailscale and Serve enabled:
-
-- `services.tailscale.serve.custom` collects `svc:` entries, excluding
-  `target = "off"`. HTTP, HTTPS, TCP, and TLS-terminated TCP flags supply TCP ports;
-  the default is `tcp:443`. For `tun = true`, declare remote ports explicitly.
-- `services.tailscale.serve.services` uses endpoint keys as ports. An explicit
-  `serve.configFile` replaces these declarations and is not read by the collector.
-
-The key is the service name without `svc:`. Devices come from
-`services.tailscale.extraFlags.hostname`, falling back to `networking.hostName`.
-Repeated service names merge ports and devices across hosts.
-
-## Credentials
-
-Configured apps decrypt `sopsSecretsFile` at runtime with `sops exec-env`.
-Edit the encrypted file in the consuming flake with SOPS.
-
-```sh
-sops edit ./secrets.yaml
-```
-
-Supply the keys needed by your configured providers in that encrypted file:
-
-```yaml
-CLOUDFLARE_API_TOKEN: "your-cloudflare-api-token"
-HETRIXTOOLS_API_TOKEN: "your-api-token"
-HETRIXTOOLS_CONTACT_LIST_ID: "your-contact-list-id"
-HEALTHCHECKS_API_KEY: "your-management-api-key"
-TAILSCALE_OAUTH_CLIENT_SECRET: "your-client-secret"
-GRAFANA_SERVICE_ACCOUNT_TOKEN: "your-service-account-token"
-```
-
-- **Cloudflare** and Wrangler share `CLOUDFLARE_API_TOKEN`. If you also use
-  octoDNS, grant DNS record access to the token configured in its Cloudflare
-  provider. [Cloudflare API token permissions](#cloudflare-api-token-permissions)
-- **HetrixTools:** v3 GET monitors, GET private notes, and POST private notes;
-  v2 add/edit/delete monitor permissions. `contact_list_id = null` uses the file's
-  contact list ID; `""` disables notifications. `--list` needs only the API token.
-- **Healthchecks:** a read-write management API key for the hosts' project,
-  separate from their ping key.
-- **Tailscale:** an OAuth client with write access to `services` and `devices:core`.
-  Only the client secret is configured. Access tokens are obtained and renewed
-  in memory; the client determines the tailnet.
-- **Grafana:** a Grafana instance service account with folder read/create/write
-  permissions and alert-rule read/create/update/delete permissions on the managed
-  folders, plus inhibition-rule read/write/delete permissions described above.
-  The new API uses alert-rule permissions, rather than the legacy
-  provisioning role. This is separate from Alloy's Cloud access-policy tokens
-  for sending metrics and logs.
-
-Keep credentials out of Nix values. The launcher preserves the inherited
-environment, with SOPS values overriding matching variables.
 
 ## Execution and development
 
