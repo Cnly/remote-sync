@@ -4,7 +4,7 @@ let
     modules = [
       ../flake-module.nix
       ({ lib, ... }: {
-        options.perSystem = lib.mkOption { type = lib.types.raw; };
+        options.perSystem = lib.mkOption { type = lib.types.deferredModule; };
         config.grafana = {
           owner = "test";
           url = "https://example.grafana.net";
@@ -60,9 +60,10 @@ let
   first = folder.rules.host-missing;
   second = folder.rules.another;
   appCfg = (lib.evalModules {
+    specialArgs = { inherit pkgs; };
     modules = [
       { options.apps = lib.mkOption { type = lib.types.attrsOf lib.types.anything; }; }
-      (cfg.perSystem { inherit pkgs; })
+      cfg.perSystem
     ];
   }).config;
 in

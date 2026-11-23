@@ -4,10 +4,11 @@ Declarative reconciliation for Cloudflare zone rules, Grafana alert folders and 
 HetrixTools HTTP monitors, Healthchecks.io checks, and Tailscale Services. Each run reads the API, uses
 DiffSync to compare it with configuration, and previews changes. `--doit` applies
 the plan. There is no persistent state file or background reconciliation.
+The flake module also provides Wrangler apps for Cloudflare Workers.
 
 ## Usage
 
-Run configured apps from the consuming flake (this repository's root):
+Run the configured reconciliation apps from the consuming flake.
 
 ```sh
 nix run .#sync-cloudflare
@@ -19,7 +20,7 @@ nix run .#sync-grafana
 nix run .#sync-grafana -- --doit
 ```
 
-All apps accept:
+The reconciliation apps accept the following options.
 
 | Option | Behavior |
 | --- | --- |
@@ -53,7 +54,7 @@ inputs.remote-sync.inputs.nixpkgs.follows = "nixpkgs";
 ```
 
 Import `inputs.remote-sync.flakeModules.default` in your flake-parts modules.
-Each provider takes an `owner` namespace, a `sopsSecretsFile`, and declarations:
+Each reconciliation provider takes an `owner` namespace, a `sopsSecretsFile`, and declarations.
 
 ```nix
 { lib, ... }: {
@@ -146,9 +147,10 @@ supplies shared defaults and collects host configuration. Collected fields use
 
 ### Cloudflare Rules
 
-The optional `cloudflare` module manages zone entry points through the Rulesets
-API. Use the zone's DNS name and the Cloudflare phase name. The app resolves the
-zone ID once per run and requires one exact match visible to the token.
+Declaring a zone under `cloudflare.zones` enables `sync-cloudflare`. The app
+manages zone entry points through the Rulesets API. Use the zone's DNS name
+and the Cloudflare phase name. The app resolves the zone ID once per run and
+requires one exact match visible to the token.
 
 ```nix
 cloudflare = {
@@ -192,6 +194,40 @@ order, appends overflow, and retains dashboard and other owners' rules by ID
 in their existing relative order. A rule added between discovery and apply can
 be lost because the update replaces the list. Use one writer per phase during a
 run. [Cloudflare ruleset updates](https://developers.cloudflare.com/ruleset-engine/rulesets-api/update/) · [Server-side validation](https://developers.cloudflare.com/ruleset-engine/rulesets-api/dry-run/)
+
+### Cloudflare Workers
+
+Declare Workers under `cloudflare.workers`. Each declaration generates a
+`sync-worker-<name>` app and defaults the Wrangler script name to the declaration
+key. Put Wrangler fields such as `routes` and `vars` in `settings`.
+`cloudflare.workerDefaults` is a module applied to every Worker.
+
+```nix
+cloudflare = {
+  sopsSecretsFile = ./secrets.yaml;
+  workerDefaults.settings.main = lib.mkDefault "source/index.js";
+  workers.site = {
+    source = ./workers/site;
+    settings.compatibility_date = "2026-09-10";
+  };
+};
+```
+
+Wrangler uses the consuming flake's `pkgs.wrangler` and reads
+`CLOUDFLARE_API_TOKEN` from the same `cloudflare.sopsSecretsFile` as the rules
+app. A Workers-only configuration can omit `cloudflare.owner`.
+
+```sh
+nix run .#wrangler -- whoami
+nix run .#sync-worker-site -- dev
+nix run .#sync-worker-site -- deploy
+```
+
+The `wrangler` app passes arguments straight to Wrangler. The per-Worker apps
+also pass the generated `wrangler.json`. Run `dev` from the consuming flake root
+with a source directory inside that flake to pick up working-tree edits.
+`deploy` uses the Nix store snapshot. Both commands share Wrangler's local
+state under `.wrangler/<name>/runtime`.
 
 ### HetrixTools
 
@@ -376,10 +412,10 @@ Repeated service names merge ports and devices across hosts.
 ## Credentials
 
 Configured apps decrypt `sopsSecretsFile` at runtime with `sops exec-env`.
-In this repository, edit `deployments/remote-sync/secrets.yaml` with SOPS:
+Edit the encrypted file in the consuming flake with SOPS.
 
 ```sh
-sops deployments/remote-sync/secrets.yaml
+sops edit ./secrets.yaml
 ```
 
 Supply the keys needed by your configured providers in that encrypted file:
@@ -393,7 +429,7 @@ TAILSCALE_OAUTH_CLIENT_SECRET: "your-client-secret"
 GRAFANA_SERVICE_ACCOUNT_TOKEN: "your-service-account-token"
 ```
 
-- **Cloudflare** needs Zone Read for name lookup and the product permissions
+- **Cloudflare zone rules** need Zone Read for name lookup and the product permissions
   for each configured phase. For example, grant Dynamic URL Redirects and
   Cache Settings read for discovery or write for apply. The provider reads
   `CLOUDFLARE_API_TOKEN` at runtime.

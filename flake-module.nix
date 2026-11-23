@@ -4,6 +4,7 @@
   inherit (lib.types) anything attrsOf bool deferredModule int listOf nullOr path str submodule;
 
   cloudflareCfg = config.cloudflare;
+  hasCloudflareZones = cloudflareCfg != null && cloudflareCfg.zones != {};
   grafanaCfg = config.grafana;
   hetrixCfg = config.hetrixtools;
   healthchecksCfg = config.healthchecks;
@@ -340,14 +341,16 @@
 
 in {
 
+  imports = [ ./wrangler ];
+
   options = {
     cloudflare = mkOption {
       default = null;
-      description = "Zone-level Cloudflare Rulesets API configuration for sync-cloudflare.";
+      description = "Cloudflare zone rules and Wrangler-managed Workers.";
       type = nullOr (submodule {
         options = {
-          owner = mkOption { type = str; description = "Namespace for nix-sync-<owner>--<key> rule refs."; };
-          sopsSecretsFile = mkOption { type = path; description = "Encrypted YAML supplying CLOUDFLARE_API_TOKEN at runtime."; };
+          owner = mkOption { type = str; description = "Namespace for nix-sync-<owner>--<key> rule refs. Required when configuring zones."; };
+          sopsSecretsFile = mkOption { type = path; description = "Encrypted YAML supplying CLOUDFLARE_API_TOKEN to the rules and Wrangler apps."; };
           zones = mkOption {
             default = {};
             description = "Cloudflare zones keyed by DNS name.";
@@ -523,14 +526,14 @@ in {
 
   in {
 
-    apps.sync-cloudflare = lib.mkIf (cloudflareCfg != null) (mkLauncherApp {
+    apps.${if hasCloudflareZones then "sync-cloudflare" else null} = mkLauncherApp {
       provider = "cloudflare";
       inherit (cloudflareCfg) owner;
       resources = lib.mapAttrs (_: zone: {
         phases = lib.mapAttrs (_: rules: { rules = orderedCloudflareRules rules; }) zone.rules;
       }) cloudflareCfg.zones;
-      sopsFile = cloudflareCfg.sopsSecretsFile;
-    });
+      sopsFile = "${cloudflareCfg.sopsSecretsFile}";
+    };
 
     apps.sync-grafana = lib.mkIf (grafanaCfg != null) (mkLauncherApp {
       provider = "grafana";
