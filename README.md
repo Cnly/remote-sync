@@ -1,6 +1,6 @@
 # Remote sync
 
-Declarative reconciliation for Grafana alert folders and inhibition rules,
+Declarative reconciliation for Cloudflare zone rules, Grafana alert folders and inhibition rules,
 HetrixTools HTTP monitors, Healthchecks.io checks, and Tailscale Services. Each run reads the API, uses
 DiffSync to compare it with configuration, and previews changes. `--doit` applies
 the plan. There is no persistent state file or background reconciliation.
@@ -10,6 +10,7 @@ the plan. There is no persistent state file or background reconciliation.
 Run configured apps from the consuming flake (this repository's root):
 
 ```sh
+nix run .#sync-cloudflare
 nix run .#sync-hetrixtools
 nix run .#sync-healthchecks
 nix run .#sync-tailscale-svc
@@ -24,7 +25,7 @@ All apps accept:
 | --- | --- |
 | `--doit` | Discover, preview, and apply the full plan, including removals. |
 | `-v`, `--verbose` | Show detailed API reads and ownership operations. |
-| `-l`, `--list` | Print inventory keyed by remote ID; Grafana groups it under `folders` and `inhibitionRules`. |
+| `-l`, `--list` | Print inventory keyed by remote ID. Cloudflare groups rulesets by zone, and Grafana groups resources under `folders` and `inhibitionRules`. |
 | `--adopt KEY=ID` | Select an existing resource within the full plan; repeatable. Grafana adoption targets folders. |
 | `--help` | Show help without decrypting credentials. |
 
@@ -34,8 +35,9 @@ approvals. It cannot be combined with `--doit` or `--adopt`.
 
 Each collection keeps its detailed diff and resource-name summary. Previews with
 multiple collections end with an overview of each collection's operation counts,
-including zero-change collections. Counts refer to managed resources: changing
-several alerts within one Grafana folder counts as one folder update.
+including zero-change collections. Several rule edits in one Cloudflare phase
+count as one phase change. Several alert edits in one Grafana folder count as
+one folder change.
 
 ## Flake configuration
 
@@ -95,6 +97,7 @@ by their declaration key.
 
 | Provider | Marker storage | Automatic adoption matches | Declaration removed |
 | --- | --- | --- | --- |
+| Cloudflare rules | Rule `ref` | Explicit rule ID within zone and phase | Delete owned rule in configured phase |
 | HetrixTools | Standalone private-note line | Exact target URL and HTTP method | Delete owned monitor |
 | Healthchecks | Tag | Exact slug | Pause owned check |
 | Tailscale | Standalone comment line | Exact service name (`svc:…`) | Delete owned service |
@@ -140,6 +143,55 @@ without deleting it, remove both its declaration and marker before applying.
 This repository's [deployment module](../deployments/remote-sync/default.nix)
 supplies shared defaults and collects host configuration. Collected fields use
 `mkDefault`, so explicit declarations can override them.
+
+### Cloudflare Rules
+
+The optional `cloudflare` module manages zone entry points through the Rulesets
+API. Use the zone's DNS name and the Cloudflare phase name. The app resolves the
+zone ID once per run and requires one exact match visible to the token.
+
+```nix
+cloudflare = {
+  owner = "flake";
+  sopsSecretsFile = ./secrets.yaml;
+  zones."example.com".rules.http_request_cache_settings.media = {
+    expression = ''http.host eq "example.com" and starts_with(http.request.uri.path, "/media/")'';
+    action = "set_cache_settings";
+    action_parameters.cache = true;
+  };
+};
+```
+
+Supported phases cover Single Redirects, Cache Rules, URL rewrites, request
+and response header transforms, Origin Rules, Configuration Rules, custom WAF
+rules, and rate limiting. Use the API's native `action_parameters`, `ratelimit`,
+and `logging` objects where applicable. [Cloudflare phase reference](https://developers.cloudflare.com/ruleset-engine/reference/phases-list/)
+
+Rules run in ascending `order` within their phase. The default is `100`, and
+ties are allowed. The Nix module breaks ties by declaration key. It emits an
+ordered JSON array with a `key` field on each rule and drops `order` after
+sorting. Give rules distinct values when their relative order
+matters. A dashboard reorder of tied managed rules can appear in the next diff.
+Changing an order value only produces a diff if the resulting sequence changes.
+
+An owned rule has a stable `nix-sync-<owner>--<key>` ref. Use `--list` to see
+each zone's rulesets and their rules in execution order, including IDs and refs.
+To adopt a dashboard rule explicitly, use
+`--adopt example.com/http_request_cache_settings/media=RULE_ID`.
+Removing a rule deletes it from its configured phase. To remove all owned rules
+from a phase, set its entry to an empty set (for example,
+`zones."example.com".rules.http_request_cache_settings = {};`) and apply before
+dropping the phase or zone configuration.
+
+Preview uses GET requests and shows one diff of the managed rules per phase.
+On `--doit` the app validates every changed phase with `dry_run=true` before
+the first live write. Each changed phase then takes one request. A new entry
+point is created with its initial rules. An existing entry point receives the
+complete rule list. The app fills surviving managed positions in declared
+order, appends overflow, and retains dashboard and other owners' rules by ID
+in their existing relative order. A rule added between discovery and apply can
+be lost because the update replaces the list. Use one writer per phase during a
+run. [Cloudflare ruleset updates](https://developers.cloudflare.com/ruleset-engine/rulesets-api/update/) · [Server-side validation](https://developers.cloudflare.com/ruleset-engine/rulesets-api/dry-run/)
 
 ### HetrixTools
 
@@ -333,6 +385,7 @@ sops deployments/remote-sync/secrets.yaml
 Supply the keys needed by your configured providers in that encrypted file:
 
 ```yaml
+CLOUDFLARE_API_TOKEN: "your-cloudflare-api-token"
 HETRIXTOOLS_API_TOKEN: "your-api-token"
 HETRIXTOOLS_CONTACT_LIST_ID: "your-contact-list-id"
 HEALTHCHECKS_API_KEY: "your-management-api-key"
@@ -340,6 +393,10 @@ TAILSCALE_OAUTH_CLIENT_SECRET: "your-client-secret"
 GRAFANA_SERVICE_ACCOUNT_TOKEN: "your-service-account-token"
 ```
 
+- **Cloudflare** needs Zone Read for name lookup and the product permissions
+  for each configured phase. For example, grant Dynamic URL Redirects and
+  Cache Settings read for discovery or write for apply. The provider reads
+  `CLOUDFLARE_API_TOKEN` at runtime.
 - **HetrixTools:** v3 GET monitors, GET private notes, and POST private notes;
   v2 add/edit/delete monitor permissions. `contact_list_id = null` uses the file's
   contact list ID; `""` disables notifications. `--list` needs only the API token.

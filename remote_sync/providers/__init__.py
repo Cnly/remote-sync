@@ -35,6 +35,9 @@ class Provider(ABC):
     def desired(self, declaration: dict) -> dict:
         """Converts a declaration into settings to compare against the remote resource."""
 
+    def validate_change(self, key: str, settings: dict | None) -> None:
+        """Optionally validate a change before any writes. A deletion has no settings."""
+
     @abstractmethod
     def resolve_identity(self, key: str, declaration: dict, resource: RemoteResource | None,
                          inventory: dict[str, RemoteResource]) -> RemoteResource | None:

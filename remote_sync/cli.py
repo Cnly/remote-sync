@@ -10,6 +10,7 @@ import structlog
 from . import utils
 from .core import APIAdapter, ConfigAdapter, Resource
 from .providers import Collection
+from .providers.cloudflare import Cloudflare
 from .providers.grafana import Grafana
 from .providers.healthchecks import Healthchecks
 from .providers.hetrixtools import HetrixTools
@@ -18,6 +19,7 @@ from .utils import progress
 
 
 PROVIDERS = {
+    "cloudflare": Cloudflare,
     "grafana": Grafana,
     "hetrixtools": HetrixTools,
     "healthchecks": Healthchecks,
@@ -62,13 +64,17 @@ def reconcile(collections: dict[str, Collection], *, owner, list_only=False, doi
     if len(summaries) > 1:
         print_overall_summary(summaries)
 
-    if not doit or not any(diff.has_diffs() for _, _, _, diff in plans):
+    changed = [(remote, desired, diff) for _, remote, desired, diff in plans if diff.has_diffs()]
+    if not doit or not changed:
         return
 
+    for remote, _, diff in changed:
+        for change in diff.get_children():
+            if change.action:
+                remote.provider.validate_change(change.name, remote.desired.get(change.name))
     progress("Applying changes...")
-    for _, remote, desired, diff in plans:
-        if diff.has_diffs():
-            remote.sync_from(desired, diff=diff)
+    for remote, desired, diff in changed:
+        remote.sync_from(desired, diff=diff)
 
     print("\nApplied.")
 

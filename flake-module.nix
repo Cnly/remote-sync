@@ -3,10 +3,31 @@
   inherit (lib) mkOption;
   inherit (lib.types) anything attrsOf bool deferredModule int listOf nullOr path str submodule;
 
+  cloudflareCfg = config.cloudflare;
   grafanaCfg = config.grafana;
   hetrixCfg = config.hetrixtools;
   healthchecksCfg = config.healthchecks;
   tailscaleCfg = config.tailscale;
+
+  cloudflareRuleModule = {
+    freeformType = attrsOf anything;
+    options = {
+      order = mkOption {
+        type = int;
+        default = 100;
+        description = "Lower values run first. Equal values are allowed. Give rules distinct values when their relative order matters.";
+      };
+      expression = mkOption { type = str; description = "Cloudflare Rules language match expression."; };
+      action = mkOption { type = str; description = "Rulesets API action for this phase."; };
+      description = mkOption { type = str; default = ""; description = "Description shown in Cloudflare."; };
+      enabled = mkOption { type = bool; default = true; description = "Whether Cloudflare executes the rule."; };
+    };
+  };
+
+  orderedCloudflareRules = rules: let
+    keyed = lib.mapAttrsToList (key: rule: rule // { inherit key; }) rules;
+    ordered = lib.sortOn (rule: [ rule.order rule.key ]) keyed;
+  in map (rule: removeAttrs rule [ "order" ]) ordered;
 
   alertRuleModule = { name, ... }: {
     # Keep API query models and optional rule fields extensible. Native module
@@ -320,6 +341,27 @@
 in {
 
   options = {
+    cloudflare = mkOption {
+      default = null;
+      description = "Zone-level Cloudflare Rulesets API configuration for sync-cloudflare.";
+      type = nullOr (submodule {
+        options = {
+          owner = mkOption { type = str; description = "Namespace for nix-sync-<owner>--<key> rule refs."; };
+          sopsSecretsFile = mkOption { type = path; description = "Encrypted YAML supplying CLOUDFLARE_API_TOKEN at runtime."; };
+          zones = mkOption {
+            default = {};
+            description = "Cloudflare zones keyed by DNS name.";
+            type = attrsOf (submodule {
+              options.rules = mkOption {
+                type = attrsOf (attrsOf (submodule cloudflareRuleModule));
+                default = {};
+                description = "Rules grouped by Cloudflare phase and keyed by stable rule name. An empty set for a phase removes this owner's rules in that phase.";
+              };
+            });
+          };
+        };
+      });
+    };
     grafana = mkOption {
       default = null;
       description = "Grafana alert-folder and notification-inhibition reconciliation; configure this to expose the sync-grafana app.";
@@ -480,6 +522,15 @@ in {
     };
 
   in {
+
+    apps.sync-cloudflare = lib.mkIf (cloudflareCfg != null) (mkLauncherApp {
+      provider = "cloudflare";
+      inherit (cloudflareCfg) owner;
+      resources = lib.mapAttrs (_: zone: {
+        phases = lib.mapAttrs (_: rules: { rules = orderedCloudflareRules rules; }) zone.rules;
+      }) cloudflareCfg.zones;
+      sopsFile = cloudflareCfg.sopsSecretsFile;
+    });
 
     apps.sync-grafana = lib.mkIf (grafanaCfg != null) (mkLauncherApp {
       provider = "grafana";

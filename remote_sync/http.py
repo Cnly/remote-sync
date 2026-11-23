@@ -34,6 +34,20 @@ def retry_delay(headers, default):
     return math.ceil(max((delay for delay in delays if math.isfinite(delay) and delay >= 0), default=default))
 
 
+class APIStatusError(AssertionError):
+    """Keep the response available to providers that recognize specific API errors."""
+
+    @property
+    def response(self):
+        return self.args[0]
+
+    def __str__(self):
+        status = self.response.status_code
+        if status == 409:
+            return "API returned HTTP 409 (conflict); preview again before retrying."
+        return f"API returned HTTP {status}; check permissions/limits and preview again."
+
+
 class API:
     def __init__(self, base_url, token=None, *, session=None, interval=0, headers=None):
         self.base_url = base_url
@@ -75,10 +89,8 @@ class API:
                         read_retries += 1
                     time.sleep(delay)
                     continue
-            assert response.status_code != 409, "API returned HTTP 409 (conflict); preview again before retrying."
-            assert 200 <= response.status_code < 300, (
-                f"API returned HTTP {response.status_code}; check permissions/limits and preview again."
-            )
+            if not 200 <= response.status_code < 300:
+                raise APIStatusError(response)
             if not expect_json:
                 return None
             try:
